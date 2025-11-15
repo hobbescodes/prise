@@ -14,3 +14,5 @@ zigdoc std.fmt.allocPrint
 ## Build Commands
 
 - Build and run: `zig build run`
+- Format code: `zig fmt .`
+- Run tests: `zig build test`
