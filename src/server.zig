@@ -125,11 +125,13 @@ const Pty = struct {
 
             // Notify main thread by writing to pipe
             // Ignore EAGAIN (pipe full means already dirty)
-            _ = posix.write(self.pipe_fds[1], "x") catch |err| {
-                if (err != error.WouldBlock) {
-                    std.log.err("Failed to signal dirty: {}", .{err});
-                }
-            };
+            if (!self.terminal.modes.get(.synchronized_output)) {
+                _ = posix.write(self.pipe_fds[1], "x") catch |err| {
+                    if (err != error.WouldBlock) {
+                        std.log.err("Failed to signal dirty: {}", .{err});
+                    }
+                };
+            }
         }
         std.log.info("PTY read thread exiting for session {}", .{self.id});
 
