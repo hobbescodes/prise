@@ -147,8 +147,15 @@ const ScreenState = struct {
     cols: usize,
     cursor_x: usize,
     cursor_y: usize,
-    cells: []CellData,
+    rows_data: []DirtyRow,
     allocator: std.mem.Allocator,
+
+    pub const RenderMode = enum { full, incremental };
+
+    pub const DirtyRow = struct {
+        y: usize,
+        cells: []CellData,
+    };
 
     const CellData = struct {
         text: []const u8, // UTF-8 encoded
@@ -156,7 +163,7 @@ const ScreenState = struct {
         wide: bool, // true if this cell is wide (occupies 2 columns)
     };
 
-    fn init(allocator: std.mem.Allocator, terminal: *ghostty_vt.Terminal, mutex: *std.Thread.Mutex) !ScreenState {
+    fn init(allocator: std.mem.Allocator, terminal: *ghostty_vt.Terminal, mutex: *std.Thread.Mutex, mode: RenderMode) !ScreenState {
         mutex.lock();
         defer mutex.unlock();
 
@@ -165,85 +172,134 @@ const ScreenState = struct {
 
         const rows = page.size.rows;
         const cols = page.size.cols;
-        const total_cells = rows * cols;
 
-        var cells = try allocator.alloc(CellData, total_cells);
-        errdefer allocator.free(cells);
+        var rows_data = std.ArrayList(DirtyRow).empty;
+        errdefer {
+            for (rows_data.items) |row| {
+                for (row.cells) |cell| {
+                    allocator.free(cell.text);
+                }
+                allocator.free(row.cells);
+            }
+            rows_data.deinit(allocator);
+        }
 
         var utf8_buf: [4]u8 = undefined;
-        var grapheme_buf: [32]u21 = undefined; // Support multi-codepoint graphemes
+        var grapheme_buf: [32]u21 = undefined;
 
-        for (0..rows) |y| {
-            const row = page.getRow(y);
-            const row_cells = page.getCells(row);
+        // Helper to capture a single row
+        const capture_row = struct {
+            fn call(
+                alloc: std.mem.Allocator,
+                p: anytype,
+                y: usize,
+                width: usize,
+                u_buf: *[4]u8,
+                g_buf: *[32]u21,
+            ) ![]CellData {
+                const row = p.getRow(y);
+                const row_cells = p.getCells(row);
+                var cells = try alloc.alloc(CellData, width);
+                errdefer alloc.free(cells);
 
-            var x: usize = 0;
-            while (x < cols) : (x += 1) {
-                const cell = &row_cells[x];
-                const idx = y * cols + x;
+                var x: usize = 0;
+                while (x < width) : (x += 1) {
+                    const cell = &row_cells[x];
 
-                // Skip spacer tails (second half of wide chars)
-                if (cell.wide == .spacer_tail) {
-                    cells[idx] = .{
-                        .text = try allocator.dupe(u8, ""),
-                        .style_id = 0,
-                        .wide = false,
-                    };
-                    continue;
-                }
-
-                // Extract text
-                var text: []const u8 = "";
-                var cluster: []const u21 = &[_]u21{};
-
-                switch (cell.content_tag) {
-                    .codepoint => {
-                        if (cell.content.codepoint != 0) {
-                            cluster = grapheme_buf[0..1];
-                            grapheme_buf[0] = cell.content.codepoint;
-                        }
-                    },
-                    .codepoint_grapheme => {
-                        // First codepoint
-                        grapheme_buf[0] = cell.content.codepoint;
-                        var len: usize = 1;
-
-                        // Additional codepoints from grapheme map
-                        if (page.lookupGrapheme(cell)) |extra| {
-                            for (extra) |cp| {
-                                if (len >= grapheme_buf.len) break;
-                                grapheme_buf[len] = cp;
-                                len += 1;
-                            }
-                        }
-                        cluster = grapheme_buf[0..len];
-                    },
-                    .bg_color_palette, .bg_color_rgb => {
-                        // Background-only cell, treat as space
-                        cluster = &[_]u21{' '};
-                    },
-                }
-
-                // Convert codepoints to UTF-8
-                if (cluster.len > 0) {
-                    var utf8_list = std.ArrayList(u8).empty;
-                    defer utf8_list.deinit(allocator);
-
-                    for (cluster) |cp| {
-                        const len = std.unicode.utf8Encode(cp, &utf8_buf) catch continue;
-                        try utf8_list.appendSlice(allocator, utf8_buf[0..len]);
+                    // Skip spacer tails (second half of wide chars)
+                    if (cell.wide == .spacer_tail) {
+                        cells[x] = .{
+                            .text = try alloc.dupe(u8, ""),
+                            .style_id = 0,
+                            .wide = false,
+                        };
+                        continue;
                     }
-                    text = try utf8_list.toOwnedSlice(allocator);
-                } else {
-                    text = try allocator.dupe(u8, " ");
-                }
 
-                cells[idx] = .{
-                    .text = text,
-                    .style_id = cell.style_id,
-                    .wide = cell.wide == .wide,
-                };
+                    // Extract text
+                    var text: []const u8 = "";
+                    var cluster: []const u21 = &[_]u21{};
+
+                    switch (cell.content_tag) {
+                        .codepoint => {
+                            if (cell.content.codepoint != 0) {
+                                cluster = g_buf[0..1];
+                                g_buf[0] = cell.content.codepoint;
+                            }
+                        },
+                        .codepoint_grapheme => {
+                            g_buf[0] = cell.content.codepoint;
+                            var len: usize = 1;
+                            if (p.lookupGrapheme(cell)) |extra| {
+                                for (extra) |cp| {
+                                    if (len >= g_buf.len) break;
+                                    g_buf[len] = cp;
+                                    len += 1;
+                                }
+                            }
+                            cluster = g_buf[0..len];
+                        },
+                        .bg_color_palette, .bg_color_rgb => {
+                            cluster = &[_]u21{' '};
+                        },
+                    }
+
+                    if (cluster.len > 0) {
+                        var utf8_list = std.ArrayList(u8).empty;
+                        defer utf8_list.deinit(alloc);
+                        for (cluster) |cp| {
+                            const len = std.unicode.utf8Encode(cp, u_buf) catch continue;
+                            try utf8_list.appendSlice(alloc, u_buf[0..len]);
+                        }
+                        text = try utf8_list.toOwnedSlice(alloc);
+                    } else {
+                        text = try alloc.dupe(u8, " ");
+                    }
+
+                    cells[x] = .{
+                        .text = text,
+                        .style_id = cell.style_id,
+                        .wide = cell.wide == .wide,
+                    };
+                }
+                return cells;
             }
+        };
+
+        // Determine which rows to capture
+        // If full mode or screen dirty, capture all.
+        // Note: screen.dirty is a bitset of dirty flags (not rows)
+        var capture_all = (mode == .full);
+
+        // Check if we can access screen.dirty
+        // Assuming screen.dirty is available and has typical bitset/struct methods.
+        // If screen has changed (resize, scroll, etc), we should redraw all.
+        if (!std.meta.eql(screen.dirty, .{})) {
+            capture_all = true;
+        }
+
+        if (capture_all) {
+            for (0..rows) |y| {
+                const cells = try capture_row.call(allocator, page, y, cols, &utf8_buf, &grapheme_buf);
+                try rows_data.append(allocator, .{ .y = y, .cells = cells });
+            }
+
+            if (mode == .incremental) {
+                // Clear all dirty flags
+                screen.dirty = .{};
+                var ds = page.dirtyBitSet();
+                ds.unsetAll();
+            }
+        } else {
+            // Incremental update
+            var ds = page.dirtyBitSet();
+            var it = ds.iterator(.{});
+            while (it.next()) |y| {
+                if (y >= rows) continue;
+                const cells = try capture_row.call(allocator, page, y, cols, &utf8_buf, &grapheme_buf);
+                try rows_data.append(allocator, .{ .y = y, .cells = cells });
+            }
+            ds.unsetAll();
         }
 
         return .{
@@ -251,21 +307,19 @@ const ScreenState = struct {
             .cols = cols,
             .cursor_x = screen.cursor.x,
             .cursor_y = screen.cursor.y,
-            .cells = cells,
+            .rows_data = try rows_data.toOwnedSlice(allocator),
             .allocator = allocator,
         };
     }
 
     fn deinit(self: *ScreenState) void {
-        for (self.cells) |cell| {
-            self.allocator.free(cell.text);
+        for (self.rows_data) |row| {
+            for (row.cells) |cell| {
+                self.allocator.free(cell.text);
+            }
+            self.allocator.free(row.cells);
         }
-        self.allocator.free(self.cells);
-    }
-
-    fn getCell(self: *const ScreenState, x: usize, y: usize) ?*const CellData {
-        if (x >= self.cols or y >= self.rows) return null;
-        return &self.cells[y * self.cols + x];
+        self.allocator.free(self.rows_data);
     }
 };
 
@@ -588,6 +642,17 @@ const Server = struct {
             try client.attached_sessions.append(self.allocator, session_id);
             std.log.info("Client {} attached to session {}", .{ client.fd, session_id });
 
+            // Send full redraw to the newly attached client
+            var state = try ScreenState.init(
+                self.allocator,
+                &pty_instance.terminal,
+                &pty_instance.terminal_mutex,
+                .full,
+            );
+            defer state.deinit();
+
+            try self.sendRedraw(self.loop, pty_instance, &state, client);
+
             return msgpack.Value{ .unsigned = session_id };
         } else if (std.mem.eql(u8, method, "write_pty")) {
             if (params != .array or params.array.len < 2 or params.array[0] != .unsigned or params.array[1] != .binary) {
@@ -849,14 +914,17 @@ const Server = struct {
         return attrs;
     }
 
-    /// Build and send redraw notification for a session to all attached clients
-    fn sendRedraw(self: *Server, loop: *io.Loop, pty_instance: *Pty, state: *ScreenState) !void {
+    /// Build and send redraw notification for a session to attached clients
+    fn sendRedraw(self: *Server, loop: *io.Loop, pty_instance: *Pty, state: *ScreenState, target_client: ?*Client) !void {
         const redraw = @import("redraw.zig");
-
-        std.log.debug("sendRedraw: session {} has {} total clients", .{ pty_instance.id, self.clients.items.len });
 
         // Send to each client attached to this session
         for (self.clients.items) |client| {
+            // If we have a target client, skip others
+            if (target_client) |target| {
+                if (client != target) continue;
+            }
+
             // Check if client is attached to this session
             var attached = false;
             for (client.attached_sessions.items) |sid| {
@@ -866,11 +934,8 @@ const Server = struct {
                 }
             }
             if (!attached) {
-                std.log.debug("Client {} not attached to session {}", .{ client.fd, pty_instance.id });
                 continue;
             }
-
-            std.log.debug("Sending redraw to client {}", .{client.fd});
 
             var builder = redraw.RedrawBuilder.init(self.allocator);
             defer builder.deinit();
@@ -883,10 +948,12 @@ const Server = struct {
             defer styles_to_define.deinit(self.allocator);
 
             // Scan all cells to find styles we haven't sent
-            for (state.cells) |cell| {
-                if (cell.style_id != 0 and !client.seen_styles.contains(cell.style_id)) {
-                    try styles_to_define.append(self.allocator, cell.style_id);
-                    try client.seen_styles.put(cell.style_id, {});
+            for (state.rows_data) |row| {
+                for (row.cells) |cell| {
+                    if (cell.style_id != 0 and !client.seen_styles.contains(cell.style_id)) {
+                        try styles_to_define.append(self.allocator, cell.style_id);
+                        try client.seen_styles.put(cell.style_id, {});
+                    }
                 }
             }
 
@@ -899,15 +966,15 @@ const Server = struct {
                 try builder.hlAttrDefine(style_id, attrs, attrs);
             }
 
-            // Build grid_line events for each row
-            var y: usize = 0;
-            while (y < state.rows) : (y += 1) {
+            // Build grid_line events for each dirty row
+            for (state.rows_data) |row| {
                 var cells_buf = std.ArrayList(redraw.UIEvent.GridLine.Cell).empty;
                 defer cells_buf.deinit(self.allocator);
 
                 var x: usize = 0;
                 while (x < state.cols) {
-                    const cell = state.getCell(x, y) orelse break;
+                    if (x >= row.cells.len) break;
+                    const cell = &row.cells[x];
 
                     // Skip empty spacer tails
                     if (cell.text.len == 0) {
@@ -920,8 +987,8 @@ const Server = struct {
                     var next_x = x + 1;
                     if (cell.wide) next_x += 1; // Skip spacer for wide char
 
-                    while (next_x < state.cols) {
-                        const next_cell = state.getCell(next_x, y) orelse break;
+                    while (next_x < state.cols and next_x < row.cells.len) {
+                        const next_cell = &row.cells[next_x];
                         if (next_cell.style_id != cell.style_id) break;
                         if (!std.mem.eql(u8, next_cell.text, cell.text)) break;
                         if (next_cell.text.len == 0) break; // Skip spacers
@@ -941,7 +1008,7 @@ const Server = struct {
                 }
 
                 if (cells_buf.items.len > 0) {
-                    try builder.gridLine(1, @intCast(y), 0, cells_buf.items, false);
+                    try builder.gridLine(1, @intCast(row.y), 0, cells_buf.items, false);
                 }
             }
 
@@ -965,6 +1032,7 @@ const Server = struct {
             self.allocator,
             &pty_instance.terminal,
             &pty_instance.terminal_mutex,
+            .incremental,
         ) catch |err| {
             std.log.err("Failed to copy screen state for session {}: {}", .{ pty_instance.id, err });
             return;
@@ -972,7 +1040,7 @@ const Server = struct {
         defer state.deinit();
 
         // Build and send redraw notifications
-        self.sendRedraw(self.loop, pty_instance, &state) catch |err| {
+        self.sendRedraw(self.loop, pty_instance, &state, null) catch |err| {
             std.log.err("Failed to send redraw for session {}: {}", .{ pty_instance.id, err });
         };
 
