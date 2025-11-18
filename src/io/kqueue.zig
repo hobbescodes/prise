@@ -299,25 +299,17 @@ pub const Loop = struct {
     }
 
     pub fn cancel(self: *Loop, id: usize) !void {
-        std.log.info("cancel called for id={}", .{id});
-        const op = self.pending.get(id) orelse {
-            std.log.warn("cancel: operation id={} not found in pending", .{id});
-            return;
-        };
+        const op = self.pending.get(id) orelse return;
 
-        std.log.info("cancel: found op kind={s} fd={}", .{ @tagName(op.kind), op.fd });
-
-        // Remove from kqueue by sending EV_DELETE
+        // Try to remove from kqueue by sending EV_DELETE
+        // Note: may fail if event was ONESHOT and already fired
         var changes = [_]posix.Kevent{.{
             .ident = @intCast(op.fd),
             .filter = switch (op.kind) {
                 .read => c.EVFILT.READ,
                 .recv => c.EVFILT.READ,
                 .send => c.EVFILT.WRITE,
-                else => {
-                    std.log.warn("cancel: can't cancel op kind={s}", .{@tagName(op.kind)});
-                    return;
-                },
+                else => return,
             },
             .flags = c.EV.DELETE,
             .fflags = 0,
@@ -325,11 +317,8 @@ pub const Loop = struct {
             .udata = id,
         }};
 
-        std.log.info("cancel: submitting EV_DELETE to kqueue", .{});
-        _ = try posix.kevent(self.kq, &changes, &[_]posix.Kevent{}, null);
-        std.log.info("cancel: removing from pending map", .{});
+        _ = posix.kevent(self.kq, &changes, &[_]posix.Kevent{}, null) catch {};
         _ = self.pending.remove(id);
-        std.log.info("cancel: done, pending count now={}", .{self.pending.count()});
     }
 
     pub fn run(self: *Loop, mode: RunMode) !void {
@@ -337,7 +326,6 @@ pub const Loop = struct {
 
         while (true) {
             if (mode == .until_done and self.pending.count() == 0) {
-                std.log.info("io.Loop.run exiting (pending count = 0)", .{});
                 break;
             }
 

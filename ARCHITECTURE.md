@@ -63,8 +63,8 @@
      3. Server resizes internal PTY -> Sends resize event to Client.
      4. Main Thread receives event -> Updates renderer state -> Repaints.
    - **Shutdown**:
-     - **User Quit**: TTY thread sends close request via pipe -> Main thread forwards to server -> Server closes connection -> Main thread detects close -> Exits process.
-     - **Server Quit**: Main thread detects disconnect -> Exits process.
+     - **User Quit (Ctrl+C)**: TTY thread sends quit message via pipe -> Main thread closes socket and pipes -> All pending I/O operations complete with errors -> io.Loop exits when pending count reaches 0 -> TTY thread exits naturally via should_quit flag -> Process exits cleanly.
+     - **Server Quit**: Main thread detects EOF on socket -> Exits process.
 
 # Client Data Model
 

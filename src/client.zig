@@ -8,6 +8,11 @@ const posix = std.posix;
 const vaxis = @import("vaxis");
 const Surface = @import("Surface.zig");
 
+pub const MsgId = enum(u16) {
+    spawn_pty = 1,
+    attach_pty = 2,
+};
+
 pub const UnixSocketClient = struct {
     allocator: std.mem.Allocator,
     fd: ?posix.fd_t = null,
@@ -129,6 +134,8 @@ pub const App = struct {
     msg_buffer: std.ArrayList(u8),
     send_buffer: ?[]u8 = null,
     send_task: ?io.Task = null,
+    recv_task: ?io.Task = null,
+    pipe_read_task: ?io.Task = null,
     pty_id: ?i64 = null,
     response_received: bool = false,
     attached: bool = false,
@@ -172,7 +179,7 @@ pub const App = struct {
 
     pub fn deinit(self: *App) void {
         self.should_quit = true;
-        self.loop.stop();
+        // Wait for TTY thread to exit naturally (it checks should_quit)
         if (self.tty_thread) |thread| {
             thread.join();
         }
@@ -181,8 +188,6 @@ pub const App = struct {
         }
         self.pipe_buffer.deinit(self.allocator);
         self.msg_buffer.deinit(self.allocator);
-        posix.close(self.pipe_read_fd);
-        posix.close(self.pipe_write_fd);
         self.vx.deinit(self.allocator, self.tty.writer());
         self.tty.deinit();
     }
@@ -200,7 +205,7 @@ pub const App = struct {
         try self.render();
 
         // Register pipe read end with io.Loop
-        _ = try loop.read(self.pipe_read_fd, &self.pipe_recv_buffer, .{
+        self.pipe_read_task = try loop.read(self.pipe_read_fd, &self.pipe_recv_buffer, .{
             .ptr = self,
             .cb = onPipeRead,
         });
@@ -340,17 +345,15 @@ pub const App = struct {
 
                 // Keep reading unless we're quitting
                 if (!app.should_quit) {
-                    std.log.debug("Resubmitting pipe read", .{});
-                    _ = try l.read(app.pipe_read_fd, &app.pipe_recv_buffer, .{
+                    app.pipe_read_task = try l.read(app.pipe_read_fd, &app.pipe_recv_buffer, .{
                         .ptr = app,
                         .cb = onPipeRead,
                     });
-                } else {
-                    std.log.info("NOT resubmitting pipe read (should_quit=true)", .{});
                 }
             },
             .err => |err| {
                 std.log.err("Pipe recv failed: {}", .{err});
+                // Don't resubmit on error
             },
             else => unreachable,
         }
@@ -407,23 +410,10 @@ pub const App = struct {
             std.log.info("Quit message received", .{});
             self.should_quit = true;
 
-            // Normal quit: cancel all pending operations and exit
-            // (detach_pty is only for when you want to keep the session alive)
-            if (self.io_loop) |l| {
-                std.log.info("io.Loop pending count before cancel: {}", .{l.pending.count()});
-
-                // Cancel all pending operations
-                var it = l.pending.iterator();
-                while (it.next()) |entry| {
-                    const id = entry.key_ptr.*;
-                    std.log.info("Cancelling operation id={}", .{id});
-                    l.cancel(id) catch |err| {
-                        std.log.err("Failed to cancel id={}: {}", .{ id, err });
-                    };
-                }
-
-                std.log.info("io.Loop pending count after cancel: {}", .{l.pending.count()});
-            }
+            // Close socket and pipes - this cancels all pending operations
+            posix.close(self.fd);
+            posix.close(self.pipe_read_fd);
+            posix.close(self.pipe_write_fd);
         }
     }
 
@@ -464,7 +454,7 @@ pub const App = struct {
                 std.log.info("Connected! fd={}", .{app.fd});
 
                 if (!app.should_quit) {
-                    app.send_buffer = try msgpack.encode(app.allocator, .{ 0, 1, "spawn_pty", .{} });
+                    app.send_buffer = try msgpack.encode(app.allocator, .{ 0, @intFromEnum(MsgId.spawn_pty), "spawn_pty", .{} });
 
                     app.send_task = try l.send(fd, app.send_buffer.?, .{
                         .ptr = app,
@@ -485,9 +475,8 @@ pub const App = struct {
         }
     }
 
-    fn onSendComplete(l: *io.Loop, completion: io.Completion) anyerror!void {
+    fn onSendComplete(_: *io.Loop, completion: io.Completion) anyerror!void {
         const app = completion.userdataCast(@This());
-        std.log.info("onSendComplete called, result type: {s}", .{@tagName(completion.result)});
 
         if (app.send_buffer) |buf| {
             app.allocator.free(buf);
@@ -495,22 +484,9 @@ pub const App = struct {
         }
 
         switch (completion.result) {
-            .send => |bytes_sent| {
-                std.log.info("Sent {} bytes, should_quit={}", .{ bytes_sent, app.should_quit });
-
-                if (!app.should_quit) {
-                    std.log.debug("Resubmitting recv after send", .{});
-                    _ = try l.recv(app.fd, &app.recv_buffer, .{
-                        .ptr = app,
-                        .cb = onRecv,
-                    });
-                } else {
-                    std.log.info("NOT resubmitting recv after send (should_quit=true)", .{});
-                }
-            },
+            .send => {},
             .err => |err| {
                 std.log.err("Send failed: {}", .{err});
-                std.log.info("NOT resubmitting recv after send error", .{});
             },
             else => unreachable,
         }
@@ -518,7 +494,6 @@ pub const App = struct {
 
     fn onRecv(l: *io.Loop, completion: io.Completion) anyerror!void {
         const app = completion.userdataCast(@This());
-        std.log.info("onRecv called, result type: {s}", .{@tagName(completion.result)});
 
         switch (completion.result) {
             .recv => |bytes_read| {
@@ -547,8 +522,6 @@ pub const App = struct {
 
                     switch (msg) {
                         .response => |resp| {
-                            std.log.info("Got response: msgid={}", .{resp.msgid});
-
                             if (resp.err) |err| {
                                 std.log.err("Error: {}", .{err});
                             } else {
@@ -559,7 +532,7 @@ pub const App = struct {
                                             std.log.info("PTY spawned with ID: {}", .{i});
 
                                             // Attach to the session
-                                            app.send_buffer = try msgpack.encode(app.allocator, .{ 0, 2, "attach_pty", .{i} });
+                                            app.send_buffer = try msgpack.encode(app.allocator, .{ 0, @intFromEnum(MsgId.attach_pty), "attach_pty", .{i} });
                                             _ = try l.send(app.fd, app.send_buffer.?, .{
                                                 .ptr = app,
                                                 .cb = onSendComplete,
@@ -575,7 +548,7 @@ pub const App = struct {
                                             std.log.info("PTY spawned with ID: {}", .{u});
 
                                             // Attach to the session
-                                            app.send_buffer = try msgpack.encode(app.allocator, .{ 0, 2, "attach_pty", .{u} });
+                                            app.send_buffer = try msgpack.encode(app.allocator, .{ 0, @intFromEnum(MsgId.attach_pty), "attach_pty", .{u} });
                                             _ = try l.send(app.fd, app.send_buffer.?, .{
                                                 .ptr = app,
                                                 .cb = onSendComplete,
@@ -621,13 +594,10 @@ pub const App = struct {
 
                 // Keep receiving unless we're quitting
                 if (!app.should_quit) {
-                    std.log.debug("Resubmitting server recv", .{});
-                    _ = try l.recv(app.fd, &app.recv_buffer, .{
+                    app.recv_task = try l.recv(app.fd, &app.recv_buffer, .{
                         .ptr = app,
                         .cb = onRecv,
                     });
-                } else {
-                    std.log.info("NOT resubmitting server recv (should_quit=true)", .{});
                 }
             },
             .err => |err| {

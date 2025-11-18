@@ -88,7 +88,6 @@ pub fn main() !void {
     );
 
     try loop.run(.until_done);
-    std.log.info("io.Loop exited", .{});
 
     if (app.connection_refused) {
         // Stale socket - remove it and fork server
@@ -145,7 +144,6 @@ pub fn main() !void {
     }
 
     if (app.connected) {
-        defer posix.close(app.fd);
         if (app.response_received) {
             if (app.pty_id) |pty_id| {
                 std.log.info("Ready with PTY ID: {}", .{pty_id});
