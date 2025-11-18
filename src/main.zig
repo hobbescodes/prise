@@ -13,6 +13,17 @@ pub fn main() !void {
     var socket_buffer: [256]u8 = undefined;
     const socket_path = try std.fmt.bufPrint(&socket_buffer, "/tmp/prise-{d}.sock", .{uid});
 
+    // Check for "serve" command
+    var args = try std.process.argsWithAllocator(allocator);
+    defer args.deinit();
+    _ = args.skip(); // skip program name
+    if (args.next()) |cmd| {
+        if (std.mem.eql(u8, cmd, "serve")) {
+            try server.startServer(allocator, socket_path);
+            return;
+        }
+    }
+
     // Check if socket exists
     std.fs.accessAbsolute(socket_path, .{}) catch |err| {
         if (err == error.FileNotFound) {
@@ -77,6 +88,7 @@ pub fn main() !void {
     );
 
     try loop.run(.until_done);
+    std.log.info("io.Loop exited", .{});
 
     if (app.connection_refused) {
         // Stale socket - remove it and fork server
@@ -122,10 +134,7 @@ pub fn main() !void {
                 break;
             }
 
-            // Retry connection
-            loop = try io.Loop.init(allocator);
-            app = try client.App.init(allocator);
-            try app.setup(&loop);
+            // Retry connection - reuse existing app/loop
             _ = try client.connectUnixSocket(
                 &loop,
                 socket_path,
@@ -137,7 +146,6 @@ pub fn main() !void {
 
     if (app.connected) {
         defer posix.close(app.fd);
-        std.log.info("Connection successful!", .{});
         if (app.response_received) {
             if (app.pty_id) |pty_id| {
                 std.log.info("Ready with PTY ID: {}", .{pty_id});

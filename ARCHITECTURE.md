@@ -1,23 +1,42 @@
 # Server Architecture
 
-1. **Main Thread**: Accepts connections and handles IPC requests, responses, and
-   notifications. It checks each PTY and sends screen updates to connected
-clients. It also writes to each PTY as needed (keyboard, mouse, etc).
-2. **PTY Threads**: Each PTY runs in its own thread. This thread does blocking
-   reads from the underlying PTY and processes VT sequences, persisting local
-state. It also handles automatic responses to certain VT queries (e.g. Device
-Attributes) by writing directly to the PTY.
-3. **Event-Oriented Frame Scheduler**:
-   - **Per-Pty Pipe**: Each `Pty` owns a non-blocking pipe pair. The
-   read end is registered with the main thread's event loop; the write end is
-   used by the PTY thread.
-   - **Producer (PTY Thread)**: After updating the terminal state, it writes a
-   single byte to the pipe. `EAGAIN` is ignored (signal already pending).
-   - **Consumer (Main Thread)**:
-     - **On Signal**: Drains the pipe. If enough time has passed since
-     `last_render_time`, renders immediately. Otherwise, if no timer is pending,
-     schedules one for the remaining duration.
-     - **On Timer**: Renders immediately and updates `last_render_time`.
+## Lifecycle
+
+- **Start**: Explicitly run with `prise serve` command
+- **Socket**: Creates Unix domain socket at `/tmp/prise-{uid}.sock`
+- **Shutdown**: Server runs indefinitely until manually stopped (does not auto-exit)
+- **Cleanup**: Removes stale socket on startup; cleans up socket on shutdown
+
+## Threading Model
+
+1. **Main Thread (Event Loop)**:
+   - Accepts client connections and handles msgpack-RPC requests/responses/notifications
+   - Manages PTY sessions and routes messages between clients and PTYs
+   - Sends screen updates (redraw notifications) to attached clients
+   - Writes to PTYs as needed (keyboard input, mouse events, resize)
+   - Handles render timers and frame scheduling
+
+2. **PTY Threads** (one per session):
+   - Performs blocking reads from the underlying PTY file descriptor
+   - Processes VT sequences using ghostty-vt, updating local terminal state
+   - Handles automatic responses to VT queries (e.g. Device Attributes) by writing directly to PTY
+   - Signals dirty state to main thread via pipe
+
+## Event-Oriented Frame Scheduler
+
+- **Per-PTY Pipe**: Each `Pty` owns a non-blocking pipe pair
+  - Read end: Registered with main thread's event loop
+  - Write end: Used by PTY thread to signal dirty state
+
+- **Producer (PTY Thread)**:
+  - After updating terminal state, writes a single byte to pipe
+  - `EAGAIN` is ignored (signal already pending)
+
+- **Consumer (Main Thread)**:
+  - **On Pipe Read**: Drains the pipe. If enough time has passed since `last_render_time` (8ms), renders immediately. Otherwise, schedules a timer for the remaining duration.
+  - **On Timer**: Renders frame and updates `last_render_time`
+
+- **Cleanup**: Render timers are cancelled when PTY sessions are destroyed to prevent event loop from staying alive
 
 # Client Architecture
 

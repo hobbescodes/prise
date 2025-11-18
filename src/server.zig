@@ -49,7 +49,7 @@ const Pty = struct {
         return instance;
     }
 
-    fn deinit(self: *Pty, allocator: std.mem.Allocator) void {
+    fn deinit(self: *Pty, allocator: std.mem.Allocator, loop: *io.Loop) void {
         self.running.store(false, .seq_cst);
 
         // Kill the PTY process
@@ -59,6 +59,13 @@ const Pty = struct {
             thread.join();
         }
         self.process.close();
+
+        // Cancel any pending render timer
+        if (self.render_timer) |*task| {
+            task.cancel(loop) catch {};
+            self.render_timer = null;
+        }
+
         posix.close(self.pipe_fds[0]);
         posix.close(self.pipe_fds[1]);
         self.terminal.deinit(allocator);
@@ -550,8 +557,10 @@ const Client = struct {
             .recv => |bytes_read| {
                 if (bytes_read == 0) {
                     // EOF - client disconnected
+                    std.log.debug("Client fd={} disconnected (EOF)", .{client.fd});
                     client.server.removeClient(client);
                 } else {
+                    std.log.debug("Received {} bytes from client fd={}", .{ bytes_read, client.fd });
                     // Got data, try to parse as RPC message
                     const data = client.recv_buffer[0..bytes_read];
                     client.handleMessage(loop, data) catch |err| {
@@ -566,6 +575,7 @@ const Client = struct {
                 }
             },
             .err => {
+                std.log.debug("Client fd={} disconnected (error)", .{client.fd});
                 client.server.removeClient(client);
             },
             else => unreachable,
@@ -745,7 +755,8 @@ const Server = struct {
     }
 
     fn shouldExit(self: *Server) bool {
-        return self.clients.items.len == 0 and self.ptys.count() == 0;
+        _ = self;
+        return false;
     }
 
     fn cleanupSessionsForClient(self: *Server, client: *Client) void {
@@ -776,7 +787,7 @@ const Server = struct {
         for (to_remove.items) |session_id| {
             if (self.ptys.fetchRemove(session_id)) |kv| {
                 std.log.info("Killing session {} (no clients, not keep_alive)", .{session_id});
-                kv.value.deinit(self.allocator);
+                kv.value.deinit(self.allocator, self.loop);
             }
         }
     }
@@ -796,6 +807,7 @@ const Server = struct {
 
         switch (completion.result) {
             .accept => |client_fd| {
+                std.log.debug("Accepted client connection fd={}", .{client_fd});
                 const client = try self.allocator.create(Client);
                 client.* = .{
                     .fd = client_fd,
@@ -804,6 +816,7 @@ const Server = struct {
                     .seen_styles = std.AutoHashMap(u16, void).init(self.allocator),
                 };
                 try self.clients.append(self.allocator, client);
+                std.log.debug("Total clients: {}", .{self.clients.items.len});
 
                 // Start recv to detect disconnect
                 _ = try loop.recv(client_fd, &client.recv_buffer, .{
@@ -827,6 +840,7 @@ const Server = struct {
     }
 
     fn removeClient(self: *Server, client: *Client) void {
+        std.log.debug("Removing client fd={}", .{client.fd});
         // Cleanup sessions (kill if no clients remain and not keep_alive)
         self.cleanupSessionsForClient(client);
         client.attached_sessions.deinit(self.allocator);
@@ -845,6 +859,7 @@ const Server = struct {
             }.noop,
         }) catch {};
         self.allocator.destroy(client);
+        std.log.debug("Total clients: {}", .{self.clients.items.len});
         self.checkExit() catch {};
     }
 
@@ -1108,6 +1123,39 @@ pub fn startServer(allocator: std.mem.Allocator, socket_path: []const u8) !void 
     var loop = try io.Loop.init(allocator);
     defer loop.deinit();
 
+    // Check if socket exists and if a server is already running
+    if (std.fs.accessAbsolute(socket_path, .{})) {
+        // Socket exists - test if server is alive
+        const test_fd = posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch |err| {
+            std.log.err("Failed to create test socket: {}", .{err});
+            return err;
+        };
+        defer posix.close(test_fd);
+
+        var addr: posix.sockaddr.un = undefined;
+        addr.family = posix.AF.UNIX;
+        @memcpy(addr.path[0..socket_path.len], socket_path);
+        addr.path[socket_path.len] = 0;
+
+        if (posix.connect(test_fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un))) {
+            // Connection succeeded - server is already running
+            std.log.err("Server is already running on {s}", .{socket_path});
+            return error.AddressInUse;
+        } else |err| {
+            if (err == error.ConnectionRefused or err == error.FileNotFound) {
+                // Stale socket
+                std.log.info("Removing stale socket", .{});
+                posix.unlink(socket_path) catch {};
+            } else {
+                std.log.err("Failed to test socket: {}", .{err});
+                return err;
+            }
+        }
+    } else |err| {
+        if (err != error.FileNotFound) return err;
+        // Socket doesn't exist, continue
+    }
+
     // Create socket
     const listen_fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
     errdefer posix.close(listen_fd);
@@ -1141,7 +1189,7 @@ pub fn startServer(allocator: std.mem.Allocator, socket_path: []const u8) !void 
         server.clients.deinit(allocator);
         var it = server.ptys.valueIterator();
         while (it.next()) |pty_instance| {
-            pty_instance.*.deinit(allocator);
+            pty_instance.*.deinit(allocator, &loop);
         }
         server.ptys.deinit();
     }

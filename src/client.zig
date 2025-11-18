@@ -6,6 +6,7 @@ const redraw = @import("redraw.zig");
 const key_notation = @import("key_notation.zig");
 const posix = std.posix;
 const vaxis = @import("vaxis");
+const Surface = @import("Surface.zig");
 
 pub const UnixSocketClient = struct {
     allocator: std.mem.Allocator,
@@ -127,6 +128,7 @@ pub const App = struct {
     recv_buffer: [4096]u8 = undefined,
     msg_buffer: std.ArrayList(u8),
     send_buffer: ?[]u8 = null,
+    send_task: ?io.Task = null,
     pty_id: ?i64 = null,
     response_received: bool = false,
     attached: bool = false,
@@ -134,11 +136,15 @@ pub const App = struct {
     tty: vaxis.Tty = undefined,
     loop: vaxis.Loop(vaxis.Event) = undefined,
     should_quit: bool = false,
-    hl_attrs: std.AutoHashMap(u32, vaxis.Style) = undefined,
-    event_thread: ?std.Thread = null,
+    tty_thread: ?std.Thread = null,
     io_loop: ?*io.Loop = null,
     tty_buffer: [4096]u8 = undefined,
-    grapheme_arena: std.heap.ArenaAllocator = undefined,
+    surface: ?Surface = null,
+
+    pipe_read_fd: posix.fd_t = undefined,
+    pipe_write_fd: posix.fd_t = undefined,
+    pipe_buffer: std.ArrayList(u8),
+    pipe_recv_buffer: [4096]u8 = undefined,
 
     pub fn init(allocator: std.mem.Allocator) !App {
         var app: App = .{
@@ -147,26 +153,36 @@ pub const App = struct {
             .tty = undefined,
             .tty_buffer = undefined,
             .loop = undefined,
-            .hl_attrs = std.AutoHashMap(u32, vaxis.Style).init(allocator),
-            .grapheme_arena = std.heap.ArenaAllocator.init(allocator),
             .msg_buffer = .empty,
+            .pipe_buffer = .empty,
         };
         app.tty = try vaxis.Tty.init(&app.tty_buffer);
         app.loop = .{ .tty = &app.tty, .vaxis = &app.vx };
         try app.loop.init();
         std.log.info("Vaxis loop initialized", .{});
+
+        // Create pipe for TTY thread -> Main thread communication
+        const fds = try posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
+        app.pipe_read_fd = fds[0];
+        app.pipe_write_fd = fds[1];
+        std.log.info("Pipe created: read_fd={} write_fd={}", .{ app.pipe_read_fd, app.pipe_write_fd });
+
         return app;
     }
 
     pub fn deinit(self: *App) void {
         self.should_quit = true;
         self.loop.stop();
-        if (self.event_thread) |thread| {
+        if (self.tty_thread) |thread| {
             thread.join();
         }
-        self.hl_attrs.deinit();
-        self.grapheme_arena.deinit();
+        if (self.surface) |*surface| {
+            surface.deinit();
+        }
+        self.pipe_buffer.deinit(self.allocator);
         self.msg_buffer.deinit(self.allocator);
+        posix.close(self.pipe_read_fd);
+        posix.close(self.pipe_write_fd);
         self.vx.deinit(self.allocator, self.tty.writer());
         self.tty.deinit();
     }
@@ -177,227 +193,264 @@ pub const App = struct {
         try self.vx.enterAltScreen(self.tty.writer());
         try self.vx.queryTerminal(self.tty.writer(), 1 * std.time.ns_per_s);
 
-        // Show cursor at 0,0 initially
+        // Initialize surface with current terminal size
         const win = self.vx.window();
-        win.showCursor(0, 0);
+        self.surface = try Surface.init(self.allocator, win.height, win.width);
 
         try self.render();
 
-        // Spawn thread to handle vaxis events
-        std.log.info("Spawning event thread...", .{});
-        self.event_thread = try std.Thread.spawn(.{}, eventThreadFn, .{self});
-        std.log.info("Event thread spawned", .{});
+        // Register pipe read end with io.Loop
+        _ = try loop.read(self.pipe_read_fd, &self.pipe_recv_buffer, .{
+            .ptr = self,
+            .cb = onPipeRead,
+        });
+
+        // Spawn TTY thread to handle vaxis events and forward via pipe
+        std.log.info("Spawning TTY thread...", .{});
+        self.tty_thread = try std.Thread.spawn(.{}, ttyThreadFn, .{self});
+        std.log.info("TTY thread spawned", .{});
     }
 
-    fn eventThreadFn(self: *App) void {
-        std.log.info("Event thread started", .{});
+    fn ttyThreadFn(self: *App) void {
+        std.log.info("TTY thread started", .{});
 
         // Start the vaxis loop (spawns TTY reader thread)
         self.loop.start() catch |err| {
             std.log.err("Failed to start vaxis loop: {}", .{err});
             return;
         };
-        std.log.info("Vaxis loop started in event thread", .{});
+        std.log.info("Vaxis loop started in TTY thread", .{});
 
         while (!self.should_quit) {
             std.log.debug("Waiting for next event...", .{});
             const event = self.loop.nextEvent();
             std.log.info("Received vaxis event: {s}", .{@tagName(event)});
-            self.processEvent(event) catch |err| {
-                std.log.err("Error processing event: {}", .{err});
+            self.forwardEventToPipe(event) catch |err| {
+                std.log.err("Error forwarding event: {}", .{err});
             };
         }
-        std.log.info("Event thread exiting", .{});
+        std.log.info("TTY thread exiting", .{});
+    }
+
+    fn forwardEventToPipe(self: *App, event: vaxis.Event) !void {
+        switch (event) {
+            .key_press => |key| {
+                // Check for Ctrl+C to quit
+                if (key.codepoint == 'c' and key.mods.ctrl) {
+                    std.log.info("Ctrl+C detected, sending quit and stopping vaxis loop", .{});
+                    const msg = try msgpack.encode(self.allocator, .{"quit"});
+                    defer self.allocator.free(msg);
+                    try self.writePipeFrame(msg);
+                    // Stop vaxis loop so TTY thread can exit
+                    self.loop.stop();
+                    return;
+                }
+
+                // Convert to notation
+                var notation_buf: [32]u8 = undefined;
+                const notation = try key_notation.fromVaxisKey(key, &notation_buf);
+
+                // Encode as msgpack: ["key", notation]
+                const msg = try msgpack.encode(self.allocator, .{ "key", notation });
+                defer self.allocator.free(msg);
+
+                try self.writePipeFrame(msg);
+            },
+            .winsize => |ws| {
+                // Encode as msgpack: ["resize", rows, cols]
+                const msg = try msgpack.encode(self.allocator, .{ "resize", ws.rows, ws.cols });
+                defer self.allocator.free(msg);
+
+                try self.writePipeFrame(msg);
+            },
+            else => {},
+        }
+    }
+
+    fn writePipeFrame(self: *App, payload: []const u8) !void {
+        // Write length-prefixed frame: [u32_le length][payload]
+        var len_buf: [4]u8 = undefined;
+        std.mem.writeInt(u32, &len_buf, @intCast(payload.len), .little);
+
+        // Write length
+        var index: usize = 0;
+        while (index < 4) {
+            const n = posix.write(self.pipe_write_fd, len_buf[index..]) catch |err| {
+                if (err == error.WouldBlock) {
+                    std.Thread.sleep(1 * std.time.ns_per_ms);
+                    continue;
+                }
+                return err;
+            };
+            index += n;
+        }
+
+        // Write payload
+        index = 0;
+        while (index < payload.len) {
+            const n = posix.write(self.pipe_write_fd, payload[index..]) catch |err| {
+                if (err == error.WouldBlock) {
+                    std.Thread.sleep(1 * std.time.ns_per_ms);
+                    continue;
+                }
+                return err;
+            };
+            index += n;
+        }
+    }
+
+    fn onPipeRead(l: *io.Loop, completion: io.Completion) anyerror!void {
+        const app = completion.userdataCast(@This());
+
+        switch (completion.result) {
+            .read => |bytes_read| {
+                if (bytes_read == 0) {
+                    std.log.warn("Pipe closed", .{});
+                    return;
+                }
+
+                // Append to pipe buffer
+                try app.pipe_buffer.appendSlice(app.allocator, app.pipe_recv_buffer[0..bytes_read]);
+
+                // Process complete frames
+                while (app.pipe_buffer.items.len >= 4) {
+                    const frame_len = std.mem.readInt(u32, app.pipe_buffer.items[0..4], .little);
+
+                    if (app.pipe_buffer.items.len < 4 + frame_len) {
+                        // Partial frame, wait for more data
+                        break;
+                    }
+
+                    // Decode msgpack payload
+                    const payload = app.pipe_buffer.items[4 .. 4 + frame_len];
+                    const value = msgpack.decode(app.allocator, payload) catch |err| {
+                        std.log.err("Failed to decode pipe message: {}", .{err});
+                        // Skip this frame
+                        try app.pipe_buffer.replaceRange(app.allocator, 0, 4 + frame_len, &.{});
+                        continue;
+                    };
+                    defer value.deinit(app.allocator);
+
+                    // Handle the message
+                    try app.handlePipeMessage(value);
+
+                    // Remove consumed bytes
+                    try app.pipe_buffer.replaceRange(app.allocator, 0, 4 + frame_len, &.{});
+                }
+
+                // Keep reading unless we're quitting
+                if (!app.should_quit) {
+                    std.log.debug("Resubmitting pipe read", .{});
+                    _ = try l.read(app.pipe_read_fd, &app.pipe_recv_buffer, .{
+                        .ptr = app,
+                        .cb = onPipeRead,
+                    });
+                } else {
+                    std.log.info("NOT resubmitting pipe read (should_quit=true)", .{});
+                }
+            },
+            .err => |err| {
+                std.log.err("Pipe recv failed: {}", .{err});
+            },
+            else => unreachable,
+        }
+    }
+
+    fn handlePipeMessage(self: *App, value: msgpack.Value) !void {
+        if (value != .array or value.array.len < 1) return;
+
+        const msg_type = value.array[0];
+        if (msg_type != .string) return;
+
+        if (std.mem.eql(u8, msg_type.string, "key")) {
+            if (value.array.len < 2 or value.array[1] != .string) return;
+
+            const notation = value.array[1].string;
+
+            // Send to server
+            if (self.attached and self.pty_id != null) {
+                const msg = try msgpack.encode(self.allocator, .{
+                    2, // notification
+                    "key_input",
+                    .{ self.pty_id.?, notation },
+                });
+                defer self.allocator.free(msg);
+
+                try self.sendDirect(msg);
+            }
+        } else if (std.mem.eql(u8, msg_type.string, "resize")) {
+            if (value.array.len < 3) return;
+
+            const rows = switch (value.array[1]) {
+                .unsigned => |u| @as(u16, @intCast(u)),
+                .integer => |i| @as(u16, @intCast(i)),
+                else => return,
+            };
+            const cols = switch (value.array[2]) {
+                .unsigned => |u| @as(u16, @intCast(u)),
+                .integer => |i| @as(u16, @intCast(i)),
+                else => return,
+            };
+
+            // Send to server
+            if (self.attached and self.pty_id != null) {
+                const msg = try msgpack.encode(self.allocator, .{
+                    2, // notification
+                    "resize_pty",
+                    .{ self.pty_id.?, rows, cols },
+                });
+                defer self.allocator.free(msg);
+
+                try self.sendDirect(msg);
+            }
+        } else if (std.mem.eql(u8, msg_type.string, "quit")) {
+            std.log.info("Quit message received", .{});
+            self.should_quit = true;
+
+            // Normal quit: cancel all pending operations and exit
+            // (detach_pty is only for when you want to keep the session alive)
+            if (self.io_loop) |l| {
+                std.log.info("io.Loop pending count before cancel: {}", .{l.pending.count()});
+
+                // Cancel all pending operations
+                var it = l.pending.iterator();
+                while (it.next()) |entry| {
+                    const id = entry.key_ptr.*;
+                    std.log.info("Cancelling operation id={}", .{id});
+                    l.cancel(id) catch |err| {
+                        std.log.err("Failed to cancel id={}: {}", .{ id, err });
+                    };
+                }
+
+                std.log.info("io.Loop pending count after cancel: {}", .{l.pending.count()});
+            }
+        }
     }
 
     pub fn handleRedraw(self: *App, params: msgpack.Value) !void {
-        if (params != .array) return error.InvalidRedrawParams;
+        if (self.surface) |*surface| {
+            try surface.applyRedraw(params);
 
-        // Reset arena - all previous graphemes will be freed
-        _ = self.grapheme_arena.reset(.retain_capacity);
-
-        const win = self.vx.window();
-
-        for (params.array) |event_val| {
-            if (event_val != .array or event_val.array.len < 2) continue;
-
-            const event_name = event_val.array[0];
-            if (event_name != .string) continue;
-
-            const event_params = event_val.array[1];
-            if (event_params != .array) continue;
-
-            if (std.mem.eql(u8, event_name.string, "grid_resize")) {
-                // event_params is [grid, width, height]
-                if (event_params.array.len < 3) continue;
-
-                const width = switch (event_params.array[1]) {
-                    .unsigned => |u| @as(u16, @intCast(u)),
-                    .integer => |i| @as(u16, @intCast(i)),
-                    else => continue,
-                };
-                const height = switch (event_params.array[2]) {
-                    .unsigned => |u| @as(u16, @intCast(u)),
-                    .integer => |i| @as(u16, @intCast(i)),
-                    else => continue,
-                };
-
-                const winsize: vaxis.Winsize = .{
-                    .rows = height,
-                    .cols = width,
-                    .x_pixel = 0,
-                    .y_pixel = 0,
-                };
-                try self.vx.resize(self.allocator, self.tty.writer(), winsize);
-            } else if (std.mem.eql(u8, event_name.string, "grid_cursor_goto")) {
-                // event_params is [grid, row, col]
-                if (event_params.array.len < 3) continue;
-
-                const row = switch (event_params.array[1]) {
-                    .unsigned => |u| @as(u16, @intCast(u)),
-                    .integer => |i| @as(u16, @intCast(i)),
-                    else => continue,
-                };
-                const col = switch (event_params.array[2]) {
-                    .unsigned => |u| @as(u16, @intCast(u)),
-                    .integer => |i| @as(u16, @intCast(i)),
-                    else => continue,
-                };
-
-                win.showCursor(col, row);
-            } else if (std.mem.eql(u8, event_name.string, "grid_line")) {
-                // event_params is [grid, row, col_start, cells, wrap]
-                if (event_params.array.len < 4) continue;
-
-                const row = switch (event_params.array[1]) {
-                    .unsigned => |u| @as(usize, @intCast(u)),
-                    .integer => |i| @as(usize, @intCast(i)),
-                    else => continue,
-                };
-                var col = switch (event_params.array[2]) {
-                    .unsigned => |u| @as(usize, @intCast(u)),
-                    .integer => |i| @as(usize, @intCast(i)),
-                    else => continue,
-                };
-
-                const cells = event_params.array[3];
-                if (cells != .array) continue;
-
-                var current_hl: u32 = 0;
-                for (cells.array) |cell| {
-                    if (cell != .array or cell.array.len == 0) continue;
-
-                    const text = if (cell.array[0] == .string) cell.array[0].string else " ";
-
-                    if (cell.array.len > 1 and cell.array[1] != .nil) {
-                        current_hl = switch (cell.array[1]) {
-                            .unsigned => |u| @as(u32, @intCast(u)),
-                            .integer => |i| @as(u32, @intCast(i)),
-                            else => current_hl,
-                        };
-                    }
-
-                    const repeat: usize = if (cell.array.len > 2 and cell.array[2] != .nil)
-                        switch (cell.array[2]) {
-                            .unsigned => |u| @intCast(u),
-                            .integer => |i| @intCast(i),
-                            else => 1,
-                        }
-                    else
-                        1;
-
-                    const style = self.hl_attrs.get(current_hl) orelse vaxis.Style{};
-
-                    var i: usize = 0;
-                    while (i < repeat) : (i += 1) {
-                        if (col < win.width and row < win.height) {
-                            // Copy grapheme into arena for stability through render
-                            const copy = self.grapheme_arena.allocator().dupe(u8, text) catch text;
-                            win.writeCell(@intCast(col), @intCast(row), .{
-                                .char = .{ .grapheme = copy },
-                                .style = style,
-                            });
-                        }
-                        col += 1;
+            // Check if we got a flush event - if so, swap and render
+            if (params == .array) {
+                for (params.array) |event_val| {
+                    if (event_val != .array or event_val.array.len < 1) continue;
+                    const event_name = event_val.array[0];
+                    if (event_name == .string and std.mem.eql(u8, event_name.string, "flush")) {
+                        surface.swap();
+                        try self.render();
+                        return;
                     }
                 }
-            } else if (std.mem.eql(u8, event_name.string, "grid_clear")) {
-                win.clear();
-            } else if (std.mem.eql(u8, event_name.string, "hl_attr_define")) {
-                // event_params is [id, rgb_attrs, cterm_attrs, info]
-                if (event_params.array.len < 2) continue;
-
-                const id = switch (event_params.array[0]) {
-                    .unsigned => |u| @as(u32, @intCast(u)),
-                    .integer => |i| @as(u32, @intCast(i)),
-                    else => continue,
-                };
-
-                const rgb_attrs = event_params.array[1];
-                if (rgb_attrs != .map) continue;
-
-                var style = vaxis.Style{};
-
-                for (rgb_attrs.map) |kv| {
-                    if (kv.key != .string) continue;
-
-                    if (std.mem.eql(u8, kv.key.string, "foreground")) {
-                        if (kv.value == .unsigned) {
-                            const val = @as(u32, @intCast(kv.value.unsigned));
-                            if (val < 256) {
-                                // Palette index
-                                style.fg = .{ .index = @intCast(val) };
-                            } else {
-                                // RGB value
-                                style.fg = .{ .rgb = .{
-                                    @intCast((val >> 16) & 0xFF),
-                                    @intCast((val >> 8) & 0xFF),
-                                    @intCast(val & 0xFF),
-                                } };
-                            }
-                        }
-                    } else if (std.mem.eql(u8, kv.key.string, "background")) {
-                        if (kv.value == .unsigned) {
-                            const val = @as(u32, @intCast(kv.value.unsigned));
-                            if (val < 256) {
-                                // Palette index
-                                style.bg = .{ .index = @intCast(val) };
-                            } else {
-                                // RGB value
-                                style.bg = .{ .rgb = .{
-                                    @intCast((val >> 16) & 0xFF),
-                                    @intCast((val >> 8) & 0xFF),
-                                    @intCast(val & 0xFF),
-                                } };
-                            }
-                        }
-                    } else if (std.mem.eql(u8, kv.key.string, "bold")) {
-                        if (kv.value == .boolean and kv.value.boolean) {
-                            style.bold = true;
-                        }
-                    } else if (std.mem.eql(u8, kv.key.string, "italic")) {
-                        if (kv.value == .boolean and kv.value.boolean) {
-                            style.italic = true;
-                        }
-                    } else if (std.mem.eql(u8, kv.key.string, "underline")) {
-                        if (kv.value == .boolean and kv.value.boolean) {
-                            style.ul_style = .single;
-                        }
-                    } else if (std.mem.eql(u8, kv.key.string, "reverse")) {
-                        if (kv.value == .boolean and kv.value.boolean) {
-                            style.reverse = true;
-                        }
-                    }
-                }
-
-                try self.hl_attrs.put(id, style);
-            } else if (std.mem.eql(u8, event_name.string, "flush")) {
-                try self.render();
             }
         }
     }
 
     pub fn render(self: *App) !void {
+        if (self.surface) |*surface| {
+            const win = self.vx.window();
+            surface.render(win);
+        }
         try self.vx.render(self.tty.writer());
     }
 
@@ -410,12 +463,16 @@ pub const App = struct {
                 app.connected = true;
                 std.log.info("Connected! fd={}", .{app.fd});
 
-                app.send_buffer = try msgpack.encode(app.allocator, .{ 0, 1, "spawn_pty", .{} });
+                if (!app.should_quit) {
+                    app.send_buffer = try msgpack.encode(app.allocator, .{ 0, 1, "spawn_pty", .{} });
 
-                _ = try l.send(fd, app.send_buffer.?, .{
-                    .ptr = app,
-                    .cb = onSendComplete,
-                });
+                    app.send_task = try l.send(fd, app.send_buffer.?, .{
+                        .ptr = app,
+                        .cb = onSendComplete,
+                    });
+                } else {
+                    std.log.info("Connected but should_quit=true, not sending spawn_pty", .{});
+                }
             },
             .err => |err| {
                 if (err == error.ConnectionRefused) {
@@ -430,6 +487,7 @@ pub const App = struct {
 
     fn onSendComplete(l: *io.Loop, completion: io.Completion) anyerror!void {
         const app = completion.userdataCast(@This());
+        std.log.info("onSendComplete called, result type: {s}", .{@tagName(completion.result)});
 
         if (app.send_buffer) |buf| {
             app.allocator.free(buf);
@@ -438,15 +496,21 @@ pub const App = struct {
 
         switch (completion.result) {
             .send => |bytes_sent| {
-                std.log.info("Sent {} bytes", .{bytes_sent});
+                std.log.info("Sent {} bytes, should_quit={}", .{ bytes_sent, app.should_quit });
 
-                _ = try l.recv(app.fd, &app.recv_buffer, .{
-                    .ptr = app,
-                    .cb = onRecv,
-                });
+                if (!app.should_quit) {
+                    std.log.debug("Resubmitting recv after send", .{});
+                    _ = try l.recv(app.fd, &app.recv_buffer, .{
+                        .ptr = app,
+                        .cb = onRecv,
+                    });
+                } else {
+                    std.log.info("NOT resubmitting recv after send (should_quit=true)", .{});
+                }
             },
             .err => |err| {
                 std.log.err("Send failed: {}", .{err});
+                std.log.info("NOT resubmitting recv after send error", .{});
             },
             else => unreachable,
         }
@@ -454,6 +518,7 @@ pub const App = struct {
 
     fn onRecv(l: *io.Loop, completion: io.Completion) anyerror!void {
         const app = completion.userdataCast(@This());
+        std.log.info("onRecv called, result type: {s}", .{@tagName(completion.result)});
 
         switch (completion.result) {
             .recv => |bytes_read| {
@@ -483,6 +548,7 @@ pub const App = struct {
                     switch (msg) {
                         .response => |resp| {
                             std.log.info("Got response: msgid={}", .{resp.msgid});
+
                             if (resp.err) |err| {
                                 std.log.err("Error: {}", .{err});
                             } else {
@@ -553,88 +619,24 @@ pub const App = struct {
                     }
                 }
 
-                // Check if we should quit
-                if (app.should_quit) {
-                    std.log.info("Quitting, closing connection", .{});
-                    _ = try l.close(app.fd, .{
-                        .ptr = null,
-                        .cb = struct {
-                            fn noop(_: *io.Loop, _: io.Completion) anyerror!void {}
-                        }.noop,
+                // Keep receiving unless we're quitting
+                if (!app.should_quit) {
+                    std.log.debug("Resubmitting server recv", .{});
+                    _ = try l.recv(app.fd, &app.recv_buffer, .{
+                        .ptr = app,
+                        .cb = onRecv,
                     });
-                    return;
+                } else {
+                    std.log.info("NOT resubmitting server recv (should_quit=true)", .{});
                 }
-
-                // Keep receiving
-                _ = try l.recv(app.fd, &app.recv_buffer, .{
-                    .ptr = app,
-                    .cb = onRecv,
-                });
             },
             .err => |err| {
                 std.log.err("Recv failed: {}", .{err});
+                std.log.info("NOT resubmitting recv after error", .{});
+                // Don't resubmit on error - let it drain
             },
             else => unreachable,
         }
-    }
-
-    fn processEvent(self: *App, event: vaxis.Event) !void {
-        std.log.debug("Processing event: {s}", .{@tagName(event)});
-        switch (event) {
-            .key_press => |key| {
-                if (self.should_quit) return;
-
-                // Check for Ctrl+C to quit
-                if (key.codepoint == 'c' and key.mods.ctrl) {
-                    std.log.info("Ctrl+C detected, quitting", .{});
-                    self.should_quit = true;
-                    // Send a ping to wake up the recv loop
-                    self.sendPing() catch {};
-                    return;
-                }
-
-                // Send keyboard input to the PTY
-                if (self.attached and self.pty_id != null) {
-                    try self.sendInput(key);
-                } else {
-                    std.log.debug("Not attached or no PTY, skipping input", .{});
-                }
-            },
-            .winsize => |ws| {
-                std.log.debug("Winsize event: {}x{}", .{ ws.rows, ws.cols });
-                // Send resize to server, which will send us redraw notifications
-                if (self.attached and self.pty_id != null) {
-                    try self.sendResize(ws);
-                } else {
-                    std.log.debug("Not attached or no PTY, skipping resize", .{});
-                }
-            },
-            else => {}, // Ignore other event types
-        }
-        std.log.debug("Event processed", .{});
-    }
-
-    fn sendInput(self: *App, key: vaxis.Key) !void {
-        // Convert vaxis key to Neovim key notation
-        var notation_buf: [32]u8 = undefined;
-        const notation = try key_notation.fromVaxisKey(key, &notation_buf);
-
-        std.log.debug("Sending key: codepoint={} mods=(ctrl={} alt={} shift={}) notation='{s}'", .{
-            key.codepoint,
-            key.mods.ctrl,
-            key.mods.alt,
-            key.mods.shift,
-            notation,
-        });
-
-        const msg = try msgpack.encode(self.allocator, .{
-            2, // notification
-            "key_input",
-            .{ self.pty_id.?, notation },
-        });
-        defer self.allocator.free(msg);
-
-        try self.sendDirect(msg);
     }
 
     fn sendDirect(self: *App, data: []const u8) !void {
@@ -643,30 +645,6 @@ pub const App = struct {
             const n = try posix.write(self.fd, data[index..]);
             index += n;
         }
-    }
-
-    fn sendResize(self: *App, ws: vaxis.Winsize) !void {
-        // Send resize_pty notification to server
-        const msg = try msgpack.encode(self.allocator, .{
-            2, // notification
-            "resize_pty",
-            .{ self.pty_id.?, ws.rows, ws.cols },
-        });
-        defer self.allocator.free(msg);
-
-        try self.sendDirect(msg);
-    }
-
-    fn sendPing(self: *App) !void {
-        // Send a ping to wake up the recv loop
-        const msg = try msgpack.encode(self.allocator, .{
-            2, // notification
-            "ping",
-            .{},
-        });
-        defer self.allocator.free(msg);
-
-        try self.sendDirect(msg);
     }
 };
 

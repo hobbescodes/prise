@@ -192,10 +192,22 @@ pub const Loop = struct {
     }
 
     pub fn cancel(self: *Loop, id: usize) !void {
-        _ = self.pending.remove(id);
+        std.log.info("cancel called for id={}", .{id});
+        const op = self.pending.get(id) orelse {
+            std.log.warn("cancel: operation id={} not found in pending", .{id});
+            return;
+        };
+
+        std.log.info("cancel: found op kind={s} fd={}", .{ @tagName(op.kind), op.fd });
+        std.log.info("cancel: submitting cancel to io_uring", .{});
+
         // Submit cancel operation
         const sqe = try self.ring.get_sqe();
         sqe.prep_cancel(@intCast(id), 0);
+
+        std.log.info("cancel: removing from pending map", .{});
+        _ = self.pending.remove(id);
+        std.log.info("cancel: done, pending count now={}", .{self.pending.count()});
     }
 
     pub fn run(self: *Loop, mode: RunMode) !void {
