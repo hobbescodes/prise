@@ -433,7 +433,7 @@ pub fn parseWidget(lua: *ziglua.Lua, allocator: std.mem.Allocator, index: i32) !
     }
     lua.pop(1);
 
-    if (std.mem.eql(u8, widget_type, "surface")) {
+    if (std.mem.eql(u8, widget_type, "terminal")) {
         // Surface default flex is 1 if not specified?
         // User said: "a surface should probably be flex = 1 by default"
         // But we already parsed flex=0 if not present.
@@ -659,7 +659,7 @@ test "parseWidget - surface default flex" {
     defer lua.deinit();
 
     lua.createTable(0, 2);
-    _ = lua.pushString("surface");
+    _ = lua.pushString("terminal");
     lua.setField(-2, "type");
     _ = lua.pushInteger(1);
     lua.setField(-2, "pty");
@@ -693,7 +693,7 @@ test "parseWidget - explicit flex" {
 
     // Surface with flex=2
     lua.createTable(0, 3);
-    _ = lua.pushString("surface");
+    _ = lua.pushString("terminal");
     lua.setField(-2, "type");
     _ = lua.pushInteger(1);
     lua.setField(-2, "pty");

@@ -1,8 +1,8 @@
 local M = {}
 
-function M.Surface(opts)
+function M.Terminal(opts)
     return {
-        type = "surface",
+        type = "terminal",
         pty = opts.pty,
     }
 end

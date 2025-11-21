@@ -8,19 +8,15 @@ local state = {
 local M = {}
 
 function M.update(event)
-    if event.type == "init" then
-        prise.spawn({
-            rows = 24,
-            cols = 80,
-            attach = true,
-        })
-    elseif event.type == "pty_attach" then
+    if event.type == "pty_attach" then
         state.pty = event.data.pty
     elseif event.type == "key_press" then
-        if event.key == "b" and event.ctrl then
+        if event.data.key == "b" and event.data.ctrl then
             state.status_bg = "magenta"
+            prise.request_frame()
             prise.set_timeout(500, function()
                 state.status_bg = "white"
+                prise.request_frame()
             end)
         end
     end
@@ -31,14 +27,14 @@ function M.view()
     local title = " Prise Terminal "
 
     if state.pty then
-        main_view = prise.Surface({ pty = state.pty })
+        main_view = prise.Terminal({ pty = state.pty })
 
         local pty_title = state.pty:title()
         if pty_title and #pty_title > 0 then
             title = " " .. pty_title .. " "
         end
     else
-        main_view = prise.Surface({ pty = 1 })
+        main_view = prise.Terminal({ pty = 1 })
     end
 
     return prise.Column({

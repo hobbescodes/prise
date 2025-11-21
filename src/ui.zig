@@ -6,6 +6,8 @@ const lua_event = @import("lua_event.zig");
 const io = @import("io.zig");
 const msgpack = @import("msgpack.zig");
 
+const logger = std.log.scoped(.lua);
+
 const prise_module = @embedFile("lua/prise.lua");
 const default_ui = @embedFile("lua/default.lua");
 
@@ -22,6 +24,8 @@ pub const UI = struct {
     quit_ctx: *anyopaque = undefined,
     spawn_callback: ?*const fn (ctx: *anyopaque, opts: SpawnOptions) anyerror!void = null,
     spawn_ctx: *anyopaque = undefined,
+    redraw_callback: ?*const fn (ctx: *anyopaque) void = null,
+    redraw_ctx: *anyopaque = undefined,
 
     pub const SpawnOptions = struct {
         rows: u16,
@@ -98,6 +102,11 @@ pub const UI = struct {
         self.spawn_callback = cb;
     }
 
+    pub fn setRedrawCallback(self: *UI, ctx: *anyopaque, cb: *const fn (ctx: *anyopaque) void) void {
+        self.redraw_ctx = ctx;
+        self.redraw_callback = cb;
+    }
+
     fn loadPriseModule(lua: *ziglua.Lua) i32 {
         lua.doString(prise_module) catch {
             lua.pushNil();
@@ -115,6 +124,29 @@ pub const UI = struct {
         // Register spawn
         lua.pushFunction(ziglua.wrap(spawn));
         lua.setField(-2, "spawn");
+
+        // Register request_frame
+        lua.pushFunction(ziglua.wrap(requestFrame));
+        lua.setField(-2, "request_frame");
+
+        // Register log
+        lua.createTable(0, 4);
+
+        lua.pushFunction(ziglua.wrap(logDebug));
+        lua.setField(-2, "debug");
+
+        lua.pushFunction(ziglua.wrap(logInfo));
+        lua.setField(-2, "info");
+
+        lua.pushFunction(ziglua.wrap(logWarn));
+        lua.setField(-2, "warn");
+
+        lua.pushFunction(ziglua.wrap(logErr));
+        lua.setField(-2, "err");
+        lua.pushFunction(ziglua.wrap(logErr));
+        lua.setField(-2, "error");
+
+        lua.setField(-2, "log");
 
         return 1;
     }
@@ -156,6 +188,44 @@ pub const UI = struct {
         } else {
             lua.raiseErrorStr("Spawn callback not configured", .{});
         }
+        return 0;
+    }
+
+    fn requestFrame(lua: *ziglua.Lua) i32 {
+        _ = lua.getField(ziglua.registry_index, "prise_ui_ptr");
+        const ui = lua.toUserdata(UI, -1) catch {
+            lua.pushNil();
+            return 1;
+        };
+        lua.pop(1); // pop ui ptr
+
+        if (ui.redraw_callback) |cb| {
+            cb(ui.redraw_ctx);
+        }
+        return 0;
+    }
+
+    fn logDebug(lua: *ziglua.Lua) i32 {
+        const msg = lua.toString(1) catch "";
+        logger.debug("{s}", .{msg});
+        return 0;
+    }
+
+    fn logInfo(lua: *ziglua.Lua) i32 {
+        const msg = lua.toString(1) catch "";
+        logger.info("{s}", .{msg});
+        return 0;
+    }
+
+    fn logWarn(lua: *ziglua.Lua) i32 {
+        const msg = lua.toString(1) catch "";
+        logger.warn("{s}", .{msg});
+        return 0;
+    }
+
+    fn logErr(lua: *ziglua.Lua) i32 {
+        const msg = lua.toString(1) catch "";
+        logger.err("{s}", .{msg});
         return 0;
     }
 

@@ -373,6 +373,8 @@ pub const App = struct {
     ui: UI = undefined,
     first_resize_done: bool = false,
     socket_path: []const u8 = undefined,
+    last_render_time: i64 = 0,
+    render_timer: ?io.Task = null,
 
     pipe_read_fd: posix.fd_t = undefined,
     pipe_write_fd: posix.fd_t = undefined,
@@ -429,6 +431,15 @@ pub const App = struct {
             self.recv_task = null;
         }
 
+        if (self.render_timer) |*task| {
+            if (self.io_loop) |loop| {
+                task.cancel(loop) catch |err| {
+                    std.log.warn("Failed to cancel render timer: {}", .{err});
+                };
+            }
+            self.render_timer = null;
+        }
+
         // Close the socket
         if (self.connected) {
             posix.close(self.fd);
@@ -463,6 +474,10 @@ pub const App = struct {
                     if (app.io_loop) |l| task.cancel(l) catch {};
                     app.recv_task = null;
                 }
+                if (app.render_timer) |*task| {
+                    if (app.io_loop) |l| task.cancel(l) catch {};
+                    app.render_timer = null;
+                }
             }
         }.quit);
 
@@ -492,6 +507,16 @@ pub const App = struct {
                 try app_ptr.spawnPty(opts);
             }
         }.spawnCb);
+
+        // Register redraw callback
+        self.ui.setRedrawCallback(self, struct {
+            fn redrawCb(ctx: *anyopaque) void {
+                const app_ptr: *App = @ptrCast(@alignCast(ctx));
+                app_ptr.scheduleRender() catch |err| {
+                    std.log.err("Failed to schedule render: {}", .{err});
+                };
+            }
+        }.redrawCb);
 
         // Manually trigger initial resize to connect
         const ws = try vaxis.Tty.getWinsize(self.tty.fd);
@@ -799,7 +824,7 @@ pub const App = struct {
                 std.log.debug("handleRedraw: params is array, shouldFlush={}", .{should_flush});
                 if (should_flush) {
                     std.log.debug("handleRedraw: flush event received, rendering", .{});
-                    try self.render();
+                    try self.scheduleRender();
                     return;
                 } else {
                     std.log.debug("handleRedraw: no flush event, not rendering yet", .{});
@@ -881,6 +906,37 @@ pub const App = struct {
         }
     }
 
+    pub fn scheduleRender(self: *App) !void {
+        if (self.io_loop) |loop| {
+            const now = std.time.milliTimestamp();
+            const FRAME_TIME = 8;
+
+            if (now - self.last_render_time >= FRAME_TIME) {
+                try self.render();
+            } else if (self.render_timer == null) {
+                const delay = FRAME_TIME - (now - self.last_render_time);
+                // Make sure delay is positive
+                const safe_delay = if (delay < 0) 0 else delay;
+                self.render_timer = try loop.timeout(@as(u64, @intCast(safe_delay)) * std.time.ns_per_ms, .{
+                    .ptr = self,
+                    .cb = onRenderTimer,
+                });
+            }
+        } else {
+            // Fallback if no loop (e.g. during tests or init)
+            try self.render();
+        }
+    }
+
+    fn onRenderTimer(loop: *io.Loop, completion: io.Completion) anyerror!void {
+        _ = loop;
+        const app = completion.userdataCast(App);
+        app.render() catch |err| {
+            std.log.err("Failed to render frame: {}", .{err});
+        };
+        app.render_timer = null;
+    }
+
     pub fn render(self: *App) !void {
         std.log.debug("render: starting render", .{});
 
@@ -913,6 +969,8 @@ pub const App = struct {
         std.log.debug("render: flushing tty", .{});
         try self.tty.tty_writer.interface.flush();
         std.log.debug("render: complete", .{});
+
+        self.last_render_time = std.time.milliTimestamp();
     }
 
     pub fn onConnected(l: *io.Loop, completion: io.Completion) anyerror!void {
