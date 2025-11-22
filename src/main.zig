@@ -174,7 +174,7 @@ test {
 
     if (builtin.os.tag.isDarwin() or builtin.os.tag.isBSD()) {
         _ = @import("io/kqueue.zig");
-    } else if (builtin.os.tag.isLinux()) {
+    } else if (builtin.os.tag == .linux) {
         _ = @import("io/io_uring.zig");
     }
 }

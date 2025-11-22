@@ -57,8 +57,7 @@ pub const Loop = struct {
             .kind = .socket,
         });
 
-        const sqe = try self.ring.socket(@intCast(domain), socket_type, protocol, 0);
-        sqe.user_data = id;
+        _ = try self.ring.socket(id, @intCast(domain), socket_type, protocol, 0);
 
         return root.Task{ .id = id, .ctx = ctx };
     }
@@ -79,8 +78,7 @@ pub const Loop = struct {
             .fd = fd,
         });
 
-        const sqe = try self.ring.connect(@intCast(fd), addr, addr_len);
-        sqe.user_data = id;
+        _ = try self.ring.connect(id, @intCast(fd), addr, addr_len);
 
         return root.Task{ .id = id, .ctx = ctx };
     }
@@ -99,8 +97,7 @@ pub const Loop = struct {
             .fd = fd,
         });
 
-        const sqe = try self.ring.accept(@intCast(fd), null, null, 0);
-        sqe.user_data = id;
+        _ = try self.ring.accept(id, @intCast(fd), null, null, 0);
 
         return root.Task{ .id = id, .ctx = ctx };
     }
@@ -121,8 +118,7 @@ pub const Loop = struct {
             .fd = fd,
         });
 
-        const sqe = try self.ring.read(@intCast(fd), buf, 0);
-        sqe.user_data = id;
+        _ = try self.ring.read(id, @intCast(fd), .{ .buffer = buf }, 0);
 
         return root.Task{ .id = id, .ctx = ctx };
     }
@@ -143,8 +139,7 @@ pub const Loop = struct {
             .fd = fd,
         });
 
-        const sqe = try self.ring.recv(@intCast(fd), .{ .buffer = buf }, 0);
-        sqe.user_data = id;
+        _ = try self.ring.recv(id, @intCast(fd), .{ .buffer = buf }, 0);
 
         return root.Task{ .id = id, .ctx = ctx };
     }
@@ -165,8 +160,7 @@ pub const Loop = struct {
             .fd = fd,
         });
 
-        const sqe = try self.ring.send(@intCast(fd), buf, 0);
-        sqe.user_data = id;
+        _ = try self.ring.send(id, @intCast(fd), buf, 0);
 
         return root.Task{ .id = id, .ctx = ctx };
     }
@@ -185,8 +179,7 @@ pub const Loop = struct {
             .fd = fd,
         });
 
-        const sqe = try self.ring.close(@intCast(fd));
-        sqe.user_data = id;
+        _ = try self.ring.close(id, @intCast(fd));
 
         return root.Task{ .id = id, .ctx = ctx };
     }
@@ -228,8 +221,6 @@ pub const Loop = struct {
         // Submit cancel operation
         const sqe = try self.ring.get_sqe();
         sqe.prep_cancel(@intCast(id), 0);
-
-        _ = self.pending.remove(id);
     }
 
     pub fn cancelByFd(self: *Loop, fd: posix.socket_t) void {
@@ -277,26 +268,30 @@ pub const Loop = struct {
         const ctx = op.ctx;
 
         if (cqe.err() != .SUCCESS) {
-            const err = switch (cqe.err()) {
-                .CONNREFUSED => error.ConnectionRefused,
-                .INPROGRESS => error.WouldBlock,
-                .AGAIN => error.WouldBlock,
-                .CANCELED => error.Canceled,
-                else => error.IOError,
-            };
+            if (op.kind == .timer and cqe.err() == .TIME) {
+                // Timer expired - treat as success
+            } else {
+                const err = switch (cqe.err()) {
+                    .CONNREFUSED => error.ConnectionRefused,
+                    .INPROGRESS => error.WouldBlock,
+                    .AGAIN => error.WouldBlock,
+                    .CANCELED => error.Canceled,
+                    else => error.IOError,
+                };
 
-            try ctx.cb(self, .{
-                .userdata = ctx.ptr,
-                .msg = ctx.msg,
-                .callback = ctx.cb,
-                .result = .{ .err = err },
-            });
-            return;
+                try ctx.cb(@ptrCast(self), .{
+                    .userdata = ctx.ptr,
+                    .msg = ctx.msg,
+                    .callback = ctx.cb,
+                    .result = .{ .err = err },
+                });
+                return;
+            }
         }
 
         switch (op.kind) {
             .socket => {
-                try ctx.cb(self, .{
+                try ctx.cb(@ptrCast(self), .{
                     .userdata = ctx.ptr,
                     .msg = ctx.msg,
                     .callback = ctx.cb,
@@ -305,7 +300,7 @@ pub const Loop = struct {
             },
 
             .connect => {
-                try ctx.cb(self, .{
+                try ctx.cb(@ptrCast(self), .{
                     .userdata = ctx.ptr,
                     .msg = ctx.msg,
                     .callback = ctx.cb,
@@ -314,7 +309,7 @@ pub const Loop = struct {
             },
 
             .accept => {
-                try ctx.cb(self, .{
+                try ctx.cb(@ptrCast(self), .{
                     .userdata = ctx.ptr,
                     .msg = ctx.msg,
                     .callback = ctx.cb,
@@ -323,7 +318,7 @@ pub const Loop = struct {
             },
 
             .read => {
-                try ctx.cb(self, .{
+                try ctx.cb(@ptrCast(self), .{
                     .userdata = ctx.ptr,
                     .msg = ctx.msg,
                     .callback = ctx.cb,
@@ -332,7 +327,7 @@ pub const Loop = struct {
             },
 
             .recv => {
-                try ctx.cb(self, .{
+                try ctx.cb(@ptrCast(self), .{
                     .userdata = ctx.ptr,
                     .msg = ctx.msg,
                     .callback = ctx.cb,
@@ -341,7 +336,7 @@ pub const Loop = struct {
             },
 
             .send => {
-                try ctx.cb(self, .{
+                try ctx.cb(@ptrCast(self), .{
                     .userdata = ctx.ptr,
                     .msg = ctx.msg,
                     .callback = ctx.cb,
@@ -350,7 +345,7 @@ pub const Loop = struct {
             },
 
             .close => {
-                try ctx.cb(self, .{
+                try ctx.cb(@ptrCast(self), .{
                     .userdata = ctx.ptr,
                     .msg = ctx.msg,
                     .callback = ctx.cb,
@@ -359,7 +354,7 @@ pub const Loop = struct {
             },
 
             .timer => {
-                try ctx.cb(self, .{
+                try ctx.cb(@ptrCast(self), .{
                     .userdata = ctx.ptr,
                     .msg = ctx.msg,
                     .callback = ctx.cb,
@@ -403,7 +398,7 @@ test "io_uring loop - timeout" {
     };
 
     const callback = struct {
-        fn cb(l: *Loop, completion: root.Completion) !void {
+        fn cb(l: *root.Loop, completion: root.Completion) !void {
             _ = l;
             const s = completion.userdataCast(State);
             switch (completion.result) {
@@ -462,19 +457,20 @@ test "io_uring loop - socket/connect/accept/recv/send/close" {
     var ctx_struct = Context{ .state = &state, .addr = &addr };
 
     const Handlers = struct {
-        fn close_accepted_cb(_: *Loop, completion: root.Completion) !void {
+        fn close_accepted_cb(_: *root.Loop, completion: root.Completion) !void {
             const s = completion.userdataCast(State);
             if (completion.result == .close) s.close_accepted_done = true;
         }
 
-        fn recv_cb(l: *Loop, completion: root.Completion) !void {
+        fn recv_cb(l: *root.Loop, completion: root.Completion) !void {
+            const real_loop: *Loop = @ptrCast(l);
             const s = completion.userdataCast(State);
             switch (completion.result) {
                 .recv => |n| {
                     s.received_bytes = n;
                     s.recv_done = true;
                     // Close accepted
-                    _ = try l.close(s.accepted_fd, .{
+                    _ = try real_loop.close(s.accepted_fd, .{
                         .ptr = s,
                         .cb = close_accepted_cb,
                     });
@@ -484,14 +480,15 @@ test "io_uring loop - socket/connect/accept/recv/send/close" {
             }
         }
 
-        fn accept_cb(l: *Loop, completion: root.Completion) !void {
+        fn accept_cb(l: *root.Loop, completion: root.Completion) !void {
+            const real_loop: *Loop = @ptrCast(l);
             const s = completion.userdataCast(State);
             switch (completion.result) {
                 .accept => |fd| {
                     s.accepted_fd = fd;
                     s.accept_done = true;
                     // Start recv
-                    _ = try l.recv(fd, &s.received_data, .{
+                    _ = try real_loop.recv(fd, &s.received_data, .{
                         .ptr = s,
                         .cb = recv_cb,
                     });
@@ -501,18 +498,19 @@ test "io_uring loop - socket/connect/accept/recv/send/close" {
             }
         }
 
-        fn close_client_cb(_: *Loop, completion: root.Completion) !void {
+        fn close_client_cb(_: *root.Loop, completion: root.Completion) !void {
             const s = completion.userdataCast(State);
             if (completion.result == .close) s.close_client_done = true;
         }
 
-        fn send_cb(l: *Loop, completion: root.Completion) !void {
+        fn send_cb(l: *root.Loop, completion: root.Completion) !void {
+            const real_loop: *Loop = @ptrCast(l);
             const s = completion.userdataCast(State);
             switch (completion.result) {
                 .send => |n| {
                     s.sent_bytes = n;
                     s.send_done = true;
-                    _ = try l.close(s.client_fd, .{
+                    _ = try real_loop.close(s.client_fd, .{
                         .ptr = s,
                         .cb = close_client_cb,
                     });
@@ -522,13 +520,14 @@ test "io_uring loop - socket/connect/accept/recv/send/close" {
             }
         }
 
-        fn connect_cb(l: *Loop, completion: root.Completion) !void {
+        fn connect_cb(l: *root.Loop, completion: root.Completion) !void {
+            const real_loop: *Loop = @ptrCast(l);
             const s = completion.userdataCast(State);
             switch (completion.result) {
                 .connect => {
                     s.connect_done = true;
                     const msg = "Hello";
-                    _ = try l.send(s.client_fd, msg, .{
+                    _ = try real_loop.send(s.client_fd, msg, .{
                         .ptr = s,
                         .cb = send_cb,
                     });
@@ -538,13 +537,14 @@ test "io_uring loop - socket/connect/accept/recv/send/close" {
             }
         }
 
-        fn socket_cb(l: *Loop, completion: root.Completion) !void {
+        fn socket_cb(l: *root.Loop, completion: root.Completion) !void {
+            const real_loop: *Loop = @ptrCast(l);
             const ctx = completion.userdataCast(Context);
             const s = ctx.state;
             switch (completion.result) {
                 .socket => |fd| {
                     s.client_fd = fd;
-                    _ = try l.connect(fd, &ctx.addr.any, ctx.addr.getOsSockLen(), .{
+                    _ = try real_loop.connect(fd, &ctx.addr.any, ctx.addr.getOsSockLen(), .{
                         .ptr = s,
                         .cb = connect_cb,
                     });
@@ -594,7 +594,7 @@ test "io_uring loop - cancel" {
     var state = State{ .canceled = &canceled };
 
     const cb = struct {
-        fn cb(l: *Loop, completion: root.Completion) !void {
+        fn cb(l: *root.Loop, completion: root.Completion) !void {
             _ = l;
             const s = completion.userdataCast(State);
             switch (completion.result) {
@@ -608,9 +608,9 @@ test "io_uring loop - cancel" {
 
     var buf: [1]u8 = undefined;
     // Read from pipe[0], nothing written so it should block
-    var task = try loop.read(fds[0], &buf, .{ .ptr = &state, .cb = cb });
+    const task = try loop.read(fds[0], &buf, .{ .ptr = &state, .cb = cb });
 
-    try task.cancel(&loop);
+    try loop.cancel(task.id);
 
     try loop.run(.until_done);
     try testing.expect(canceled);
@@ -634,7 +634,7 @@ test "io_uring loop - cancelByFd" {
     var state = State{ .canceled = &canceled };
 
     const cb = struct {
-        fn cb(l: *Loop, completion: root.Completion) !void {
+        fn cb(l: *root.Loop, completion: root.Completion) !void {
             _ = l;
             const s = completion.userdataCast(State);
             switch (completion.result) {
