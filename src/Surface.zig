@@ -1,3 +1,4 @@
+const client = @import("client.zig");
 const std = @import("std");
 const vaxis = @import("vaxis");
 const msgpack = @import("msgpack.zig");
@@ -354,12 +355,102 @@ pub fn applyRedraw(self: *Surface, params: msgpack.Value) !void {
     }
 }
 
-pub fn render(self: *Surface, win: vaxis.Window, focused: bool) void {
+// Use fallback palette if needed
+const fallback_palette: [16]vaxis.Cell.Color = .{
+    .{ .rgb = .{ 0x00, 0x00, 0x00 } }, // Black
+    .{ .rgb = .{ 0xcd, 0x00, 0x00 } }, // Red
+    .{ .rgb = .{ 0x00, 0xcd, 0x00 } }, // Green
+    .{ .rgb = .{ 0xcd, 0xcd, 0x00 } }, // Yellow
+    .{ .rgb = .{ 0x00, 0x00, 0xee } }, // Blue
+    .{ .rgb = .{ 0xcd, 0x00, 0xcd } }, // Magenta
+    .{ .rgb = .{ 0x00, 0xcd, 0xcd } }, // Cyan
+    .{ .rgb = .{ 0xe5, 0xe5, 0xe5 } }, // White
+    .{ .rgb = .{ 0x7f, 0x7f, 0x7f } }, // Bright Black
+    .{ .rgb = .{ 0xff, 0x00, 0x00 } }, // Bright Red
+    .{ .rgb = .{ 0x00, 0xff, 0x00 } }, // Bright Green
+    .{ .rgb = .{ 0xff, 0xff, 0x00 } }, // Bright Yellow
+    .{ .rgb = .{ 0x5c, 0x5c, 0xff } }, // Bright Blue
+    .{ .rgb = .{ 0xff, 0x00, 0xff } }, // Bright Magenta
+    .{ .rgb = .{ 0x00, 0xff, 0xff } }, // Bright Cyan
+    .{ .rgb = .{ 0xff, 0xff, 0xff } }, // Bright White
+};
+
+pub fn render(self: *Surface, win: vaxis.Window, focused: bool, terminal_colors: *const client.App.TerminalColors, dim_factor: f32) void {
     // Copy front buffer to vaxis window
     for (0..self.rows) |row| {
         for (0..self.cols) |col| {
             if (col < win.width and row < win.height) {
-                const cell = self.front.readCell(@intCast(col), @intCast(row)) orelse continue;
+                var cell = self.front.readCell(@intCast(col), @intCast(row)) orelse continue;
+
+                // Apply dimming if needed
+                if (dim_factor > 0.0) {
+                    // Resolve background color
+                    var bg_rgb: [3]u8 = undefined;
+                    var has_bg = false;
+
+                    const bg = cell.style.bg;
+                    switch (bg) {
+                        .rgb => |rgb| {
+                            bg_rgb = rgb;
+                            has_bg = true;
+                        },
+                        .index => |idx| {
+                            if (idx < 16) {
+                                // Try terminal colors first, then fallback
+                                if (terminal_colors.palette[idx]) |c_val| {
+                                    switch (c_val) {
+                                        .rgb => |rgb| {
+                                            bg_rgb = rgb;
+                                            has_bg = true;
+                                        },
+                                        else => {},
+                                    }
+                                } else {
+                                    switch (fallback_palette[idx]) {
+                                        .rgb => |rgb| {
+                                            bg_rgb = rgb;
+                                            has_bg = true;
+                                        },
+                                        else => {},
+                                    }
+                                }
+                            } else {
+                                // Extended palette 16-255: use standard xterm palette (not implemented yet, just use default logic or map)
+                                // For now, just keep as is if > 15, or implement xterm 256 lookup
+                                // Let's skip dimming for indices > 15 if we don't have a lookup table,
+                                // OR just let vaxis handle it.
+                                // But to dim, we NEED to know the RGB.
+                                // For now, only dim if we can resolve RGB.
+                                win.writeCell(@intCast(col), @intCast(row), cell);
+                                continue;
+                            }
+                        },
+                        .default => {
+                            if (terminal_colors.bg) |c| {
+                                switch (c) {
+                                    .rgb => |rgb| {
+                                        bg_rgb = rgb;
+                                        has_bg = true;
+                                    },
+                                    else => {
+                                        bg_rgb = .{ 0, 0, 0 };
+                                        has_bg = true;
+                                    },
+                                }
+                            } else {
+                                // Assume black if unknown default
+                                bg_rgb = .{ 0, 0, 0 };
+                                has_bg = true;
+                            }
+                        },
+                    }
+
+                    // Calculate dimmed background
+                    if (has_bg) {
+                        const dimmed_bg = client.App.TerminalColors.reduceContrast(bg_rgb, dim_factor);
+                        cell.style.bg = .{ .rgb = dimmed_bg };
+                    }
+                }
 
                 win.writeCell(@intCast(col), @intCast(row), cell);
             }

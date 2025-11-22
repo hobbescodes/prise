@@ -426,6 +426,43 @@ pub const App = struct {
     parser: vaxis.Parser = undefined,
     pipe_buf: std.ArrayList(u8),
     pipe_recv_buffer: [4096]u8 = undefined,
+    colors: TerminalColors = .{},
+
+    pub const TerminalColors = struct {
+        fg: ?vaxis.Cell.Color = null,
+        bg: ?vaxis.Cell.Color = null,
+        palette: [16]?vaxis.Cell.Color = .{null} ** 16,
+
+        pub fn isDark(rgb: [3]u8) bool {
+            const r: u32 = rgb[0];
+            const g: u32 = rgb[1];
+            const b: u32 = rgb[2];
+            // Perceived luminance (Rec. 601)
+            // Y = 0.299R + 0.587G + 0.114B
+            // Using integer arithmetic with 1000 scale
+            const y = 299 * r + 587 * g + 114 * b;
+            return y < 128000;
+        }
+
+        pub fn reduceContrast(rgb: [3]u8, factor: f32) [3]u8 {
+            std.debug.assert(factor >= 0.0 and factor <= 1.0);
+            if (isDark(rgb)) {
+                // Dark background -> Lighten (mix with white)
+                return .{
+                    @intFromFloat(@as(f32, @floatFromInt(rgb[0])) * (1.0 - factor) + 255.0 * factor),
+                    @intFromFloat(@as(f32, @floatFromInt(rgb[1])) * (1.0 - factor) + 255.0 * factor),
+                    @intFromFloat(@as(f32, @floatFromInt(rgb[2])) * (1.0 - factor) + 255.0 * factor),
+                };
+            } else {
+                // Light background -> Darken (mix with black)
+                return .{
+                    @intFromFloat(@as(f32, @floatFromInt(rgb[0])) * (1.0 - factor)),
+                    @intFromFloat(@as(f32, @floatFromInt(rgb[1])) * (1.0 - factor)),
+                    @intFromFloat(@as(f32, @floatFromInt(rgb[2])) * (1.0 - factor)),
+                };
+            }
+        }
+    };
 
     pub fn init(allocator: std.mem.Allocator) !App {
         var app: App = .{
@@ -554,6 +591,13 @@ pub const App = struct {
 
         // Send terminal queries to detect capabilities
         try self.vx.queryTerminalSend(self.tty.writer());
+
+        // Query colors
+        try self.vx.queryColor(self.tty.writer(), .fg);
+        try self.vx.queryColor(self.tty.writer(), .bg);
+        for (0..16) |i| {
+            try self.vx.queryColor(self.tty.writer(), .{ .index = @intCast(i) });
+        }
 
         // Register spawn callback
         self.ui.setSpawnCallback(self, struct {
@@ -775,6 +819,18 @@ pub const App = struct {
                     }
                 }
             },
+            .color_report => |report| {
+                const color: vaxis.Cell.Color = .{ .rgb = report.value };
+                std.log.debug("Received color report: kind={any} color={any}", .{ report.kind, color });
+                switch (report.kind) {
+                    .fg => self.colors.fg = color,
+                    .bg => self.colors.bg = color,
+                    .index => |idx| if (idx < 16) {
+                        self.colors.palette[idx] = color;
+                    },
+                    else => {},
+                }
+            },
             else => {},
         }
     }
@@ -882,7 +938,9 @@ pub const App = struct {
                             std.log.err("Failed to send resize: {}", .{err});
                         };
                     }
-                    surface.render(win, w.focus);
+                    // Calculate dim factor based on focus
+                    const dim_factor: f32 = if (w.focus) 0.0 else 0.05; // Dim inactive windows by 5%
+                    surface.render(win, w.focus, &self.colors, dim_factor);
                 }
             },
             .text => |text| {
