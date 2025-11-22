@@ -13,10 +13,11 @@ cursor_shape: redraw.UIEvent.CursorShape.Shape = .block,
 dirty: bool = false,
 hl_attrs: std.AutoHashMap(u32, vaxis.Style),
 title: std.ArrayList(u8),
+pty_id: u32,
 
 const redraw = @import("redraw.zig");
 
-pub fn init(allocator: std.mem.Allocator, rows: u16, cols: u16) !Surface {
+pub fn init(allocator: std.mem.Allocator, pty_id: u32, rows: u16, cols: u16) !Surface {
     const front = try allocator.create(vaxis.AllocatingScreen);
     errdefer allocator.destroy(front);
 
@@ -36,6 +37,7 @@ pub fn init(allocator: std.mem.Allocator, rows: u16, cols: u16) !Surface {
         .cols = cols,
         .hl_attrs = std.AutoHashMap(u32, vaxis.Style).init(allocator),
         .title = std.ArrayList(u8).empty,
+        .pty_id = pty_id,
     };
 }
 
@@ -383,7 +385,7 @@ test "Surface - applyRedraw style handling" {
 
     const allocator = testing.allocator;
 
-    var surface = try Surface.init(allocator, 5, 10);
+    var surface = try Surface.init(allocator, 1, 5, 10);
     defer surface.deinit();
 
     // Define style 1 (red)
@@ -470,7 +472,7 @@ test "Surface - applyRedraw style handling with integer attributes" {
 
     const allocator = testing.allocator;
 
-    var surface = try Surface.init(allocator, 5, 10);
+    var surface = try Surface.init(allocator, 1, 5, 10);
     defer surface.deinit();
 
     // Define style 2 with integer fg (using msgpack integer type explicitly)
@@ -513,7 +515,7 @@ test "Surface - applyRedraw extended attributes" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    var surface = try Surface.init(allocator, 5, 10);
+    var surface = try Surface.init(allocator, 1, 5, 10);
     defer surface.deinit();
 
     var items = std.ArrayList(msgpack.Value.KeyValue).empty;

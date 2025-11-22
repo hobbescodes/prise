@@ -763,17 +763,35 @@ const Client = struct {
                             },
                         };
 
+                        var x_pixel: u16 = 0;
+                        var y_pixel: u16 = 0;
+
+                        if (notif.params.array.len >= 5) {
+                            x_pixel = switch (notif.params.array[3]) {
+                                .unsigned => |u| @intCast(u),
+                                .integer => |i| @intCast(i),
+                                else => 0,
+                            };
+                            y_pixel = switch (notif.params.array[4]) {
+                                .unsigned => |u| @intCast(u),
+                                .integer => |i| @intCast(i),
+                                else => 0,
+                            };
+                        }
+
                         if (self.server.ptys.get(session_id)) |pty_instance| {
-                            if (pty_instance.terminal.rows == rows and pty_instance.terminal.cols == cols) {
-                                std.log.info("Skipping resize for session {}, already at {}x{}", .{ session_id, rows, cols });
-                                return;
-                            }
+                            // Always resize if we get an event, as pixel dimensions might have changed even if rows/cols didn't?
+                            // But usually we check rows/cols match.
+                            // Let's keep the optimization but check pixels too if they are non-zero?
+                            // Ghostty internal terminal doesn't store pixel size directly in public fields easily?
+                            // It stores cols/rows.
+                            // But we should update PTY size with pixels.
 
                             const size: pty.winsize = .{
                                 .ws_row = rows,
                                 .ws_col = cols,
-                                .ws_xpixel = 0,
-                                .ws_ypixel = 0,
+                                .ws_xpixel = x_pixel,
+                                .ws_ypixel = y_pixel,
                             };
                             var pty_mut = pty_instance.process;
                             pty_mut.setSize(size) catch |err| {
@@ -781,17 +799,19 @@ const Client = struct {
                             };
 
                             // Also resize the terminal state
-                            pty_instance.terminal_mutex.lock();
-                            pty_instance.terminal.resize(
-                                pty_instance.allocator,
-                                cols,
-                                rows,
-                            ) catch |err| {
-                                std.log.err("Resize terminal failed: {}", .{err});
-                            };
-                            pty_instance.terminal_mutex.unlock();
+                            if (pty_instance.terminal.rows != rows or pty_instance.terminal.cols != cols) {
+                                pty_instance.terminal_mutex.lock();
+                                pty_instance.terminal.resize(
+                                    pty_instance.allocator,
+                                    cols,
+                                    rows,
+                                ) catch |err| {
+                                    std.log.err("Resize terminal failed: {}", .{err});
+                                };
+                                pty_instance.terminal_mutex.unlock();
+                            }
 
-                            std.log.info("Resized session {} to {}x{}", .{ session_id, rows, cols });
+                            std.log.info("Resized session {} to {}x{} ({}x{}px)", .{ session_id, rows, cols, x_pixel, y_pixel });
                         } else {
                             std.log.warn("resize_pty notification: session {} not found", .{session_id});
                         }
@@ -914,14 +934,33 @@ const Server = struct {
         };
     }
 
-    fn parseResizePtyParams(params: msgpack.Value) !struct { id: usize, rows: u16, cols: u16 } {
+    fn parseResizePtyParams(params: msgpack.Value) !struct { id: usize, rows: u16, cols: u16, x_pixel: u16, y_pixel: u16 } {
         if (params != .array or params.array.len < 3 or params.array[0] != .unsigned or params.array[1] != .unsigned or params.array[2] != .unsigned) {
             return error.InvalidParams;
         }
+
+        var x_pixel: u16 = 0;
+        var y_pixel: u16 = 0;
+
+        if (params.array.len >= 5) {
+            x_pixel = switch (params.array[3]) {
+                .unsigned => |u| @intCast(u),
+                .integer => |i| @intCast(i),
+                else => 0,
+            };
+            y_pixel = switch (params.array[4]) {
+                .unsigned => |u| @intCast(u),
+                .integer => |i| @intCast(i),
+                else => 0,
+            };
+        }
+
         return .{
             .id = @intCast(params.array[0].unsigned),
             .rows = @intCast(params.array[1].unsigned),
             .cols = @intCast(params.array[2].unsigned),
+            .x_pixel = x_pixel,
+            .y_pixel = y_pixel,
         };
     }
 
@@ -1043,21 +1082,19 @@ const Server = struct {
             const session_id = args.id;
             const rows = args.rows;
             const cols = args.cols;
+            const x_pixel = args.x_pixel;
+            const y_pixel = args.y_pixel;
 
             const pty_instance = self.ptys.get(session_id) orelse {
                 return msgpack.Value{ .string = try self.allocator.dupe(u8, "session not found") };
             };
 
-            if (pty_instance.terminal.rows == rows and pty_instance.terminal.cols == cols) {
-                std.log.info("Skipping resize for session {}, already at {}x{}", .{ session_id, rows, cols });
-                return msgpack.Value.nil;
-            }
-
+            // Update PTY size including pixels
             const size: pty.winsize = .{
                 .ws_row = rows,
                 .ws_col = cols,
-                .ws_xpixel = 0,
-                .ws_ypixel = 0,
+                .ws_xpixel = x_pixel,
+                .ws_ypixel = y_pixel,
             };
 
             var pty_mut = pty_instance.process;
@@ -1066,18 +1103,20 @@ const Server = struct {
                 return msgpack.Value{ .string = try self.allocator.dupe(u8, "resize failed") };
             };
 
-            // Also resize the terminal state
-            pty_instance.terminal_mutex.lock();
-            pty_instance.terminal.resize(
-                pty_instance.allocator,
-                cols,
-                rows,
-            ) catch |err| {
-                std.log.err("Resize terminal failed: {}", .{err});
-            };
-            pty_instance.terminal_mutex.unlock();
+            // Also resize the terminal state if grid dimensions changed
+            if (pty_instance.terminal.rows != rows or pty_instance.terminal.cols != cols) {
+                pty_instance.terminal_mutex.lock();
+                pty_instance.terminal.resize(
+                    pty_instance.allocator,
+                    cols,
+                    rows,
+                ) catch |err| {
+                    std.log.err("Resize terminal failed: {}", .{err});
+                };
+                pty_instance.terminal_mutex.unlock();
+            }
 
-            std.log.info("Resized session {} to {}x{}", .{ session_id, rows, cols });
+            std.log.info("Resized session {} to {}x{} ({}x{}px)", .{ session_id, rows, cols, x_pixel, y_pixel });
             return msgpack.Value.nil;
         } else if (std.mem.eql(u8, method, "detach_pty")) {
             const args = parseDetachPtyParams(params) catch {
@@ -1826,6 +1865,22 @@ test "parseResizePtyParams" {
     try testing.expectEqual(@as(usize, 42), args.id);
     try testing.expectEqual(@as(u16, 50), args.rows);
     try testing.expectEqual(@as(u16, 80), args.cols);
+    try testing.expectEqual(@as(u16, 0), args.x_pixel);
+    try testing.expectEqual(@as(u16, 0), args.y_pixel);
+
+    var pixel_args = [_]msgpack.Value{
+        .{ .unsigned = 42 },
+        .{ .unsigned = 50 },
+        .{ .unsigned = 80 },
+        .{ .unsigned = 800 },
+        .{ .unsigned = 600 },
+    };
+    const p_args = try Server.parseResizePtyParams(.{ .array = &pixel_args });
+    try testing.expectEqual(@as(usize, 42), p_args.id);
+    try testing.expectEqual(@as(u16, 50), p_args.rows);
+    try testing.expectEqual(@as(u16, 80), p_args.cols);
+    try testing.expectEqual(@as(u16, 800), p_args.x_pixel);
+    try testing.expectEqual(@as(u16, 600), p_args.y_pixel);
 }
 
 test "parseDetachPtyParams" {

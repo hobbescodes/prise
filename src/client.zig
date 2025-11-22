@@ -133,7 +133,6 @@ pub const ClientState = struct {
     attached: bool = false,
     should_quit: bool = false,
     connection_refused: bool = false,
-    pending_resize: ?struct { rows: u16, cols: u16, msgid: u32 } = null,
     next_msgid: u32 = 1,
 
     pub fn init() ClientState {
@@ -146,7 +145,6 @@ pub const ServerAction = union(enum) {
     send_attach: i64,
     redraw: msgpack.Value,
     attached,
-    confirm_resize: struct { rows: u16, cols: u16 },
 };
 
 pub const PipeAction = union(enum) {
@@ -164,22 +162,8 @@ pub const ClientLogic = struct {
                 if (resp.err) |err_val| {
                     _ = err_val;
                     std.log.err("Error in response", .{});
-                    // If this was our pending resize, clear it
-                    if (state.pending_resize) |pending| {
-                        if (resp.msgid == pending.msgid) {
-                            state.pending_resize = null;
-                        }
-                    }
                     return .none;
                 } else {
-                    // Check if this is a response to our pending resize
-                    if (state.pending_resize) |pending| {
-                        if (resp.msgid == pending.msgid) {
-                            state.pending_resize = null;
-                            return ServerAction{ .confirm_resize = .{ .rows = pending.rows, .cols = pending.cols } };
-                        }
-                    }
-
                     switch (resp.result) {
                         .integer => |i| {
                             if (state.pty_id == null) {
@@ -375,6 +359,10 @@ pub const App = struct {
     socket_path: []const u8 = undefined,
     last_render_time: i64 = 0,
     render_timer: ?io.Task = null,
+
+    // Terminal metrics
+    cell_width_px: u16 = 0,
+    cell_height_px: u16 = 0,
 
     pipe_read_fd: posix.fd_t = undefined,
     pipe_write_fd: posix.fd_t = undefined,
@@ -657,52 +645,13 @@ pub const App = struct {
                 }
             },
             .winsize => |ws| {
-                // Reuse performResize logic or call it
-                const rows = ws.rows;
-                const cols = ws.cols;
-
-                // Copied from handlePipeMessage .send_resize logic
-                if (!self.first_resize_done) {
-                    self.first_resize_done = true;
-                    std.log.info("First resize event: {}x{}, initializing and connecting", .{ cols, rows });
-                    self.performResize(rows, cols);
-                    if (self.io_loop) |loop| {
-                        std.log.info("Connecting to server at {s}", .{self.socket_path});
-                        _ = try connectUnixSocket(loop, self.socket_path, .{
-                            .ptr = self,
-                            .cb = onConnected,
-                        });
-                    }
-                    return;
+                // Calculate and store cell metrics
+                if (ws.cols > 0 and ws.rows > 0) {
+                    self.cell_width_px = if (ws.x_pixel > 0) ws.x_pixel / ws.cols else 0;
+                    self.cell_height_px = if (ws.y_pixel > 0) ws.y_pixel / ws.rows else 0;
                 }
-
-                std.log.info("Resize event: {}x{}", .{ cols, rows });
-                if (self.surface) |surface| {
-                    if (surface.rows == rows and surface.cols == cols) {
-                        return;
-                    }
-                }
-
-                if (self.state.attached and self.state.pty_id != null) {
-                    const msgid = self.state.next_msgid;
-                    self.state.next_msgid += 1;
-                    self.state.pending_resize = .{
-                        .rows = rows,
-                        .cols = cols,
-                        .msgid = msgid,
-                    };
-                    // Send resize_pty
-                    const msg = try msgpack.encode(self.allocator, .{
-                        0, // request
-                        msgid,
-                        "resize_pty",
-                        .{ self.state.pty_id.?, rows, cols },
-                    });
-                    defer self.allocator.free(msg);
-                    try self.sendDirect(msg);
-                } else {
-                    self.performResize(rows, cols);
-                }
+                self.vx.state.in_band_resize = true;
+                try self.vx.resize(self.allocator, self.tty.writer(), ws);
             },
             .cap_kitty_keyboard => {
                 std.log.info("kitty keyboard capability detected", .{});
@@ -742,24 +691,23 @@ pub const App = struct {
                 self.ui.update(.init) catch |err| {
                     std.log.err("Failed to update UI with init: {}", .{err});
                 };
+
+                if (!self.connected) {
+                    if (self.io_loop) |loop| {
+                        std.log.info("Initiating connection to {s} (da1 received)", .{self.socket_path});
+                        _ = try connectUnixSocket(loop, self.socket_path, .{
+                            .ptr = self,
+                            .cb = App.onConnected,
+                        });
+                    }
+                }
             },
             else => {},
         }
     }
 
-    fn performResize(self: *App, rows: u16, cols: u16) void {
-        std.log.info("Performing resize to {}x{}", .{ cols, rows });
-        // Resize vaxis
-        const winsize: vaxis.Winsize = .{
-            .rows = rows,
-            .cols = cols,
-            .x_pixel = 0,
-            .y_pixel = 0,
-        };
-        self.vx.resize(self.allocator, self.tty.writer(), winsize) catch |err| {
-            std.log.err("Failed to resize vaxis: {}", .{err});
-            return;
-        };
+    fn updateSurfaceSize(self: *App, pty_id: u32, rows: u16, cols: u16) void {
+        std.log.info("Updating surface size to {}x{}", .{ cols, rows });
 
         // Create or resize surface
         if (self.surface) |*surface| {
@@ -767,12 +715,39 @@ pub const App = struct {
                 std.log.err("Failed to resize surface: {}", .{err});
             };
         } else {
-            self.surface = Surface.init(self.allocator, rows, cols) catch |err| {
+            self.surface = Surface.init(self.allocator, pty_id, rows, cols) catch |err| {
                 std.log.err("Failed to create surface: {}", .{err});
                 return;
             };
             std.log.info("Surface initialized: {}x{}", .{ cols, rows });
         }
+    }
+
+    pub fn sendResize(self: *App, pty_id: u32, rows: u16, cols: u16) !void {
+        // Check if surface is already at correct size
+        if (self.surface) |*surface| {
+            // Only check if this is the active surface
+            // Since we currently only have one surface, we assume it corresponds to the pty being resized?
+            // Actually, we can't rely on self.surface unless we know pty_id matches.
+            // But surface doesn't store pty_id (except indirectly via widget).
+            // However, updateSurfaceSize relies on self.surface.
+            if (surface.rows == rows and surface.cols == cols) return;
+
+            // Update surface immediately
+            try surface.resize(rows, cols);
+        }
+
+        const msgid = self.state.next_msgid;
+        self.state.next_msgid += 1;
+
+        const width_px = @as(u16, cols) * self.cell_width_px;
+        const height_px = @as(u16, rows) * self.cell_height_px;
+
+        const msg = try msgpack.encode(self.allocator, .{ 0, msgid, "resize_pty", .{ pty_id, rows, cols, width_px, height_px } });
+        defer self.allocator.free(msg);
+
+        try self.sendDirect(msg);
+        std.log.info("Sent resize request id={} for pty={} to {}x{} ({}x{}px)", .{ msgid, pty_id, cols, rows, width_px, height_px });
     }
 
     pub fn handleRedraw(self: *App, params: msgpack.Value) !void {
@@ -803,7 +778,14 @@ pub const App = struct {
         switch (w.kind) {
             .surface => |surf| {
                 if (self.surface) |*surface| {
-                    _ = surf;
+                    // Check if we need to resize the PTY
+                    if (surface.pty_id == surf.pty_id) {
+                        if (w.width != surface.cols or w.height != surface.rows) {
+                            self.sendResize(surf.pty_id, w.height, w.width) catch |err| {
+                                std.log.err("Failed to send resize: {}", .{err});
+                            };
+                        }
+                    }
                     surface.render(win);
                 }
             },
@@ -1059,7 +1041,7 @@ pub const App = struct {
                                 if (app.surface == null) {
                                     const ws = try vaxis.Tty.getWinsize(app.tty.fd);
                                     std.log.info("Creating surface for attached session: {}x{}", .{ ws.rows, ws.cols });
-                                    app.surface = Surface.init(app.allocator, ws.rows, ws.cols) catch |err| {
+                                    app.surface = Surface.init(app.allocator, @intCast(pty_id), ws.rows, ws.cols) catch |err| {
                                         std.log.err("Failed to create surface: {}", .{err});
                                         return error.SurfaceInitFailed;
                                     };
@@ -1111,19 +1093,17 @@ pub const App = struct {
                                     };
 
                                     std.log.info("Sending initial resize: {}x{}", .{ surface.rows, surface.cols });
+                                    const width_px = @as(u16, surface.cols) * app.cell_width_px;
+                                    const height_px = @as(u16, surface.rows) * app.cell_height_px;
                                     const resize_msg = try msgpack.encode(app.allocator, .{
                                         2, // notification
                                         "resize_pty",
-                                        .{ pty_id, surface.rows, surface.cols },
+                                        .{ pty_id, surface.rows, surface.cols, width_px, height_px },
                                     });
                                     defer app.allocator.free(resize_msg);
                                     try app.sendDirect(resize_msg);
                                 }
                             }
-                        },
-                        .confirm_resize => |size| {
-                            std.log.info("Confirmed resize: {}x{}", .{ size.cols, size.rows });
-                            app.performResize(size.rows, size.cols);
                         },
                         .none => {},
                     }
