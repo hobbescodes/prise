@@ -220,7 +220,21 @@ fn ptyIndex(lua: *ziglua.Lua) i32 {
         lua.pushFunction(ziglua.wrap(ptySendMouse));
         return 1;
     }
+    if (std.mem.eql(u8, key, "size")) {
+        lua.pushFunction(ziglua.wrap(ptySize));
+        return 1;
+    }
     return 0;
+}
+
+fn ptySize(lua: *ziglua.Lua) i32 {
+    const pty = lua.checkUserdata(PtyHandle, 1, "PrisePty");
+    lua.createTable(0, 2);
+    lua.pushInteger(@intCast(pty.surface.rows));
+    lua.setField(-2, "rows");
+    lua.pushInteger(@intCast(pty.surface.cols));
+    lua.setField(-2, "cols");
+    return 1;
 }
 
 fn ptyTitle(lua: *ziglua.Lua) i32 {

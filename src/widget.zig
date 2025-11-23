@@ -20,7 +20,7 @@ pub const Widget = struct {
     y: u16 = 0,
     width: u16 = 0,
     height: u16 = 0,
-    flex: u8 = 0,
+    flex: u32 = 0,
     focus: bool = false,
     kind: WidgetKind,
 
@@ -554,7 +554,7 @@ pub fn parseWidget(lua: *ziglua.Lua, allocator: std.mem.Allocator, index: i32) !
     const widget_type = try lua.toString(-1);
     lua.pop(1);
 
-    var flex: u8 = 0;
+    var flex: u32 = 0;
     _ = lua.getField(index, "flex");
     if (lua.typeOf(-1) == .number) {
         flex = @intCast(try lua.toInteger(-1));
@@ -847,7 +847,7 @@ test "parseWidget - surface default flex" {
     var w = try parseWidget(lua, allocator, -1);
     defer w.deinit(allocator);
 
-    try testing.expectEqual(@as(u8, 1), w.flex);
+    try testing.expectEqual(@as(u32, 1), w.flex);
 }
 
 test "parseWidget - explicit flex" {
@@ -869,7 +869,7 @@ test "parseWidget - explicit flex" {
     var w = try parseWidget(lua, allocator, -1);
     defer w.deinit(allocator);
 
-    try testing.expectEqual(@as(u8, 1), w.flex);
+    try testing.expectEqual(@as(u32, 1), w.flex);
 
     // Surface with flex=2
     lua.createTable(0, 3);
@@ -883,7 +883,7 @@ test "parseWidget - explicit flex" {
     var w2 = try parseWidget(lua, allocator, -1);
     defer w2.deinit(allocator);
 
-    try testing.expectEqual(@as(u8, 2), w2.flex);
+    try testing.expectEqual(@as(u32, 2), w2.flex);
 }
 
 test "Column Layout - Flex" {

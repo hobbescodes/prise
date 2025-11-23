@@ -29,7 +29,7 @@ const foo = Type{ ... };
 ## Build Commands
 
 - Build and run: `zig build run`
-- Format code: `zig fmt .`
+- Format code: `zig build fmt`
 - Run tests: `zig build test`
 
 ## Testing
@@ -57,6 +57,14 @@ To test async operations:
 4. Run the loop with `try loop.run(.until_done)`
 
 See src/io/mock.zig for examples of testing with the mock event loop.
+
+
+## Pre-commit Verification
+
+Before committing changes, always run:
+1. `zig build fmt`
+2. `zig build`
+3. `zig build test`
 
 ## Commit Message Format
 
