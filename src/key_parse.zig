@@ -36,8 +36,8 @@ pub const MouseEventType = enum {
 };
 
 pub const MouseEvent = struct {
-    col: u16,
-    row: u16,
+    x: f64,
+    y: f64,
     button: MouseButton,
     type: MouseEventType,
     mods: Mods,
@@ -47,8 +47,8 @@ pub const MouseEvent = struct {
 pub fn parseMouseMap(map: msgpack.Value) !MouseEvent {
     if (map != .map) return error.InvalidMouseFormat;
 
-    var col: u16 = 0;
-    var row: u16 = 0;
+    var x: f64 = 0;
+    var y: f64 = 0;
     var button: MouseButton = .none;
     var type_: MouseEventType = .press;
     var mods: Mods = .{};
@@ -57,10 +57,20 @@ pub fn parseMouseMap(map: msgpack.Value) !MouseEvent {
         if (entry.key != .string) continue;
         const field = entry.key.string;
 
-        if (std.mem.eql(u8, field, "col")) {
-            if (entry.value == .unsigned) col = @intCast(entry.value.unsigned);
-        } else if (std.mem.eql(u8, field, "row")) {
-            if (entry.value == .unsigned) row = @intCast(entry.value.unsigned);
+        if (std.mem.eql(u8, field, "x")) {
+            x = switch (entry.value) {
+                .float => entry.value.float,
+                .unsigned => @floatFromInt(entry.value.unsigned),
+                .integer => @floatFromInt(entry.value.integer),
+                else => 0,
+            };
+        } else if (std.mem.eql(u8, field, "y")) {
+            y = switch (entry.value) {
+                .float => entry.value.float,
+                .unsigned => @floatFromInt(entry.value.unsigned),
+                .integer => @floatFromInt(entry.value.integer),
+                else => 0,
+            };
         } else if (std.mem.eql(u8, field, "button")) {
             if (entry.value == .string) {
                 const s = entry.value.string;
@@ -103,8 +113,8 @@ pub fn parseMouseMap(map: msgpack.Value) !MouseEvent {
     }
 
     return .{
-        .col = col,
-        .row = row,
+        .x = x,
+        .y = y,
         .button = button,
         .type = type_,
         .mods = mods,
@@ -112,11 +122,12 @@ pub fn parseMouseMap(map: msgpack.Value) !MouseEvent {
 }
 
 /// Parse key from msgpack map to ghostty KeyEvent
-/// Expected format: { "key": "a", "shiftKey": false, "ctrlKey": false, "altKey": false, "metaKey": false }
+/// Expected format: { "key": "a", "code": "KeyA", "shiftKey": false, "ctrlKey": false, "altKey": false, "metaKey": false }
 pub fn parseKeyMap(map: msgpack.Value) !KeyEvent {
     if (map != .map) return error.InvalidKeyFormat;
 
-    var key_str: ?[]const u8 = null;
+    var key_str: ?[]const u8 = null; // W3C "key" - produced character
+    var code_str: ?[]const u8 = null; // W3C "code" - physical key
     var mods: Mods = .{};
 
     for (map.map) |entry| {
@@ -126,6 +137,10 @@ pub fn parseKeyMap(map: msgpack.Value) !KeyEvent {
         if (std.mem.eql(u8, field, "key")) {
             if (entry.value == .string) {
                 key_str = entry.value.string;
+            }
+        } else if (std.mem.eql(u8, field, "code")) {
+            if (entry.value == .string) {
+                code_str = entry.value.string;
             }
         } else if (std.mem.eql(u8, field, "shiftKey")) {
             if (entry.value == .boolean) mods.shift = entry.value.boolean;
@@ -138,54 +153,118 @@ pub fn parseKeyMap(map: msgpack.Value) !KeyEvent {
         }
     }
 
-    if (key_str == null) return error.MissingKey;
-    const key = key_str.?;
+    const code = code_str orelse return error.MissingCode;
+    const key = key_str orelse "";
 
-    // Map key string to ghostty Key enum
-    const key_enum = mapKeyString(key);
+    // Map physical key code to ghostty Key enum
+    const key_enum = mapCodeToKey(code);
+
+    // utf8 should only contain actual character data, not key names
+    // If key equals code (e.g., "Backspace" == "Backspace"), it's a named key with no character
+    const utf8 = if (std.mem.eql(u8, key, code)) "" else key;
 
     return .{
         .key = key_enum,
-        .utf8 = if (key_enum == .unidentified) key else "",
+        .utf8 = utf8,
         .mods = @bitCast(mods),
     };
 }
 
-fn mapKeyString(key: []const u8) Key {
-    // Single character -> unidentified (use utf8)
-    if (key.len == 1) return .unidentified;
-
-    // Named keys
-    if (std.mem.eql(u8, key, "Enter")) return .enter;
-    if (std.mem.eql(u8, key, "Tab")) return .tab;
-    if (std.mem.eql(u8, key, "Backspace")) return .backspace;
-    if (std.mem.eql(u8, key, "Escape")) return .escape;
-    if (std.mem.eql(u8, key, " ")) return .space;
-    if (std.mem.eql(u8, key, "Delete")) return .delete;
-    if (std.mem.eql(u8, key, "Insert")) return .insert;
-    if (std.mem.eql(u8, key, "Home")) return .home;
-    if (std.mem.eql(u8, key, "End")) return .end;
-    if (std.mem.eql(u8, key, "PageUp")) return .page_up;
-    if (std.mem.eql(u8, key, "PageDown")) return .page_down;
-    if (std.mem.eql(u8, key, "ArrowUp")) return .arrow_up;
-    if (std.mem.eql(u8, key, "ArrowDown")) return .arrow_down;
-    if (std.mem.eql(u8, key, "ArrowLeft")) return .arrow_left;
-    if (std.mem.eql(u8, key, "ArrowRight")) return .arrow_right;
-
+// W3C code -> ghostty Key mapping
+const code_map = std.StaticStringMap(Key).initComptime(.{
+    // Special keys
+    .{ "Enter", .enter },
+    .{ "Tab", .tab },
+    .{ "Backspace", .backspace },
+    .{ "Escape", .escape },
+    .{ "Space", .space },
+    .{ "Delete", .delete },
+    .{ "Insert", .insert },
+    .{ "Home", .home },
+    .{ "End", .end },
+    .{ "PageUp", .page_up },
+    .{ "PageDown", .page_down },
+    .{ "ArrowUp", .arrow_up },
+    .{ "ArrowDown", .arrow_down },
+    .{ "ArrowLeft", .arrow_left },
+    .{ "ArrowRight", .arrow_right },
     // Function keys
-    if (std.mem.eql(u8, key, "F1")) return .f1;
-    if (std.mem.eql(u8, key, "F2")) return .f2;
-    if (std.mem.eql(u8, key, "F3")) return .f3;
-    if (std.mem.eql(u8, key, "F4")) return .f4;
-    if (std.mem.eql(u8, key, "F5")) return .f5;
-    if (std.mem.eql(u8, key, "F6")) return .f6;
-    if (std.mem.eql(u8, key, "F7")) return .f7;
-    if (std.mem.eql(u8, key, "F8")) return .f8;
-    if (std.mem.eql(u8, key, "F9")) return .f9;
-    if (std.mem.eql(u8, key, "F10")) return .f10;
-    if (std.mem.eql(u8, key, "F11")) return .f11;
-    if (std.mem.eql(u8, key, "F12")) return .f12;
+    .{ "F1", .f1 },
+    .{ "F2", .f2 },
+    .{ "F3", .f3 },
+    .{ "F4", .f4 },
+    .{ "F5", .f5 },
+    .{ "F6", .f6 },
+    .{ "F7", .f7 },
+    .{ "F8", .f8 },
+    .{ "F9", .f9 },
+    .{ "F10", .f10 },
+    .{ "F11", .f11 },
+    .{ "F12", .f12 },
+    // Modifier keys
+    .{ "ShiftLeft", .shift_left },
+    .{ "ShiftRight", .shift_right },
+    .{ "ControlLeft", .control_left },
+    .{ "ControlRight", .control_right },
+    .{ "AltLeft", .alt_left },
+    .{ "AltRight", .alt_right },
+    .{ "MetaLeft", .meta_left },
+    .{ "MetaRight", .meta_right },
+    .{ "CapsLock", .caps_lock },
+    .{ "NumLock", .num_lock },
+    .{ "ScrollLock", .scroll_lock },
+    // Letter keys
+    .{ "KeyA", .key_a },
+    .{ "KeyB", .key_b },
+    .{ "KeyC", .key_c },
+    .{ "KeyD", .key_d },
+    .{ "KeyE", .key_e },
+    .{ "KeyF", .key_f },
+    .{ "KeyG", .key_g },
+    .{ "KeyH", .key_h },
+    .{ "KeyI", .key_i },
+    .{ "KeyJ", .key_j },
+    .{ "KeyK", .key_k },
+    .{ "KeyL", .key_l },
+    .{ "KeyM", .key_m },
+    .{ "KeyN", .key_n },
+    .{ "KeyO", .key_o },
+    .{ "KeyP", .key_p },
+    .{ "KeyQ", .key_q },
+    .{ "KeyR", .key_r },
+    .{ "KeyS", .key_s },
+    .{ "KeyT", .key_t },
+    .{ "KeyU", .key_u },
+    .{ "KeyV", .key_v },
+    .{ "KeyW", .key_w },
+    .{ "KeyX", .key_x },
+    .{ "KeyY", .key_y },
+    .{ "KeyZ", .key_z },
+    // Digit keys
+    .{ "Digit0", .digit_0 },
+    .{ "Digit1", .digit_1 },
+    .{ "Digit2", .digit_2 },
+    .{ "Digit3", .digit_3 },
+    .{ "Digit4", .digit_4 },
+    .{ "Digit5", .digit_5 },
+    .{ "Digit6", .digit_6 },
+    .{ "Digit7", .digit_7 },
+    .{ "Digit8", .digit_8 },
+    .{ "Digit9", .digit_9 },
+    // Punctuation
+    .{ "Minus", .minus },
+    .{ "Equal", .equal },
+    .{ "BracketLeft", .bracket_left },
+    .{ "BracketRight", .bracket_right },
+    .{ "Backslash", .backslash },
+    .{ "Semicolon", .semicolon },
+    .{ "Quote", .quote },
+    .{ "Backquote", .backquote },
+    .{ "Comma", .comma },
+    .{ "Period", .period },
+    .{ "Slash", .slash },
+});
 
-    // Multi-byte UTF-8 or unknown -> use utf8 field
-    return .unidentified;
+fn mapCodeToKey(code: []const u8) Key {
+    return code_map.get(code) orelse .unidentified;
 }

@@ -9,6 +9,7 @@ pub const UIEvent = union(enum) {
     write: Write,
     cursor_pos: CursorPos,
     cursor_shape: CursorShape,
+    mouse_shape: MouseShape,
     style: Style,
     title: Title,
     flush: void,
@@ -58,6 +59,37 @@ pub const UIEvent = union(enum) {
             block = 0,
             beam = 1,
             underline = 2,
+        };
+    };
+
+    /// ["mouse_shape", pty, shape]
+    /// Maps to CSS cursor values / OSC 22
+    pub const MouseShape = struct {
+        pty: u32,
+        shape: Shape,
+
+        pub const Shape = enum(u8) {
+            default = 0,
+            text = 1,
+            pointer = 2,
+            help = 3,
+            progress = 4,
+            wait = 5,
+            cell = 6,
+            crosshair = 7,
+            move = 8,
+            not_allowed = 9,
+            grab = 10,
+            grabbing = 11,
+            ew_resize = 12,
+            ns_resize = 13,
+            nesw_resize = 14,
+            nwse_resize = 15,
+            col_resize = 16,
+            row_resize = 17,
+            all_scroll = 18,
+            zoom_in = 19,
+            zoom_out = 20,
         };
     };
 
@@ -210,6 +242,24 @@ pub const RedrawBuilder = struct {
     pub fn cursorShape(self: *RedrawBuilder, pty: u32, shape: UIEvent.CursorShape.Shape) !void {
         const arena = self.arena.allocator();
         const event_name = msgpack.Value{ .string = try arena.dupe(u8, "cursor_shape") };
+
+        const args = try arena.alloc(msgpack.Value, 2);
+        args[0] = msgpack.Value{ .unsigned = pty };
+        args[1] = msgpack.Value{ .unsigned = @intFromEnum(shape) };
+
+        const args_array = msgpack.Value{ .array = args };
+
+        const event_arr = try arena.alloc(msgpack.Value, 2);
+        event_arr[0] = event_name;
+        event_arr[1] = args_array;
+
+        try self.events.append(self.allocator, msgpack.Value{ .array = event_arr });
+    }
+
+    /// Add a mouse_shape event
+    pub fn mouseShape(self: *RedrawBuilder, pty: u32, shape: UIEvent.MouseShape.Shape) !void {
+        const arena = self.arena.allocator();
+        const event_name = msgpack.Value{ .string = try arena.dupe(u8, "mouse_shape") };
 
         const args = try arena.alloc(msgpack.Value, 2);
         args[0] = msgpack.Value{ .unsigned = pty };

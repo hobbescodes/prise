@@ -15,6 +15,22 @@ pub const Size = struct {
     height: u16,
 };
 
+pub const HitRegion = struct {
+    pty_id: u32,
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+
+    pub fn contains(self: HitRegion, px: f64, py: f64) bool {
+        const x_start: f64 = @floatFromInt(self.x);
+        const y_start: f64 = @floatFromInt(self.y);
+        const x_end: f64 = @floatFromInt(self.x + self.width);
+        const y_end: f64 = @floatFromInt(self.y + self.height);
+        return px >= x_start and px < x_end and py >= y_start and py < y_end;
+    }
+};
+
 pub const Widget = struct {
     x: u16 = 0,
     y: u16 = 0,
@@ -334,7 +350,64 @@ pub const Widget = struct {
             },
         }
     }
+
+    pub fn collectHitRegions(self: *const Widget, allocator: std.mem.Allocator, offset_x: u16, offset_y: u16) ![]HitRegion {
+        var regions = std.ArrayList(HitRegion).empty;
+        errdefer regions.deinit(allocator);
+
+        try self.collectHitRegionsRecursive(allocator, &regions, offset_x, offset_y);
+
+        return regions.toOwnedSlice(allocator);
+    }
+
+    fn collectHitRegionsRecursive(self: *const Widget, allocator: std.mem.Allocator, regions: *std.ArrayList(HitRegion), offset_x: u16, offset_y: u16) !void {
+        const abs_x = offset_x + self.x;
+        const abs_y = offset_y + self.y;
+
+        switch (self.kind) {
+            .surface => |surface| {
+                try regions.append(allocator, .{
+                    .pty_id = surface.pty_id,
+                    .x = abs_x,
+                    .y = abs_y,
+                    .width = self.width,
+                    .height = self.height,
+                });
+            },
+            .column => |col| {
+                for (col.children) |*child| {
+                    try child.collectHitRegionsRecursive(allocator, regions, abs_x, abs_y);
+                }
+            },
+            .row => |row| {
+                for (row.children) |*child| {
+                    try child.collectHitRegionsRecursive(allocator, regions, abs_x, abs_y);
+                }
+            },
+            .text => {},
+        }
+    }
 };
+
+pub fn hitTest(regions: []const HitRegion, x: f64, y: f64) ?u32 {
+    var i = regions.len;
+    while (i > 0) {
+        i -= 1;
+        if (regions[i].contains(x, y)) {
+            return regions[i].pty_id;
+        }
+    }
+    return null;
+}
+
+pub fn findRegion(regions: []const HitRegion, pty_id: u32) ?HitRegion {
+    for (regions) |region| {
+        if (region.pty_id == pty_id) {
+            return region;
+        }
+    }
+    return null;
+}
 
 pub const WidgetKind = union(enum) {
     surface: Surface,

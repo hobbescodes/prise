@@ -231,6 +231,35 @@ const Pty = struct {
     }
 };
 
+/// Map ghostty MouseShape to redraw MouseShape
+fn mapMouseShape(shape: ghostty_vt.MouseShape) redraw.UIEvent.MouseShape.Shape {
+    return switch (shape) {
+        .default => .default,
+        .text => .text,
+        .pointer => .pointer,
+        .help => .help,
+        .progress => .progress,
+        .wait => .wait,
+        .cell => .cell,
+        .crosshair => .crosshair,
+        .move => .move,
+        .not_allowed => .not_allowed,
+        .no_drop => .not_allowed,
+        .grab => .grab,
+        .grabbing => .grabbing,
+        .ew_resize, .e_resize, .w_resize => .ew_resize,
+        .ns_resize, .n_resize, .s_resize => .ns_resize,
+        .nesw_resize, .ne_resize, .sw_resize => .nesw_resize,
+        .nwse_resize, .nw_resize, .se_resize => .nwse_resize,
+        .col_resize => .col_resize,
+        .row_resize => .row_resize,
+        .all_scroll => .all_scroll,
+        .zoom_in => .zoom_in,
+        .zoom_out => .zoom_out,
+        .context_menu, .alias, .copy, .vertical_text => .default,
+    };
+}
+
 /// Convert ghostty style to Prise Style Attributes
 fn getStyleAttributes(style: ghostty_vt.Style, selected: bool) redraw.UIEvent.Style.Attributes {
     var attrs: redraw.UIEvent.Style.Attributes = .{
@@ -312,6 +341,7 @@ fn buildRedrawMessageFromPty(
 
     pty_instance.terminal_mutex.lock();
     try pty_instance.render_state.update(pty_instance.allocator, &pty_instance.terminal);
+    const mouse_shape = mapMouseShape(pty_instance.terminal.mouse_shape);
     pty_instance.terminal_mutex.unlock();
 
     const rs = &pty_instance.render_state;
@@ -545,6 +575,9 @@ fn buildRedrawMessageFromPty(
     };
     try builder.cursorShape(@intCast(pty_instance.id), shape);
 
+    // Send mouse shape
+    try builder.mouseShape(@intCast(pty_instance.id), mouse_shape);
+
     try builder.flush();
     return builder.build();
 }
@@ -680,24 +713,12 @@ const Client = struct {
                         };
                         const key_map = notif.params.array[1];
 
-                        std.log.debug("Received key_input: session={}", .{session_id});
-
                         if (self.server.ptys.get(session_id)) |pty_instance| {
-                            // Parse key map to ghostty key
                             const key = key_parse.parseKeyMap(key_map) catch |err| {
                                 std.log.err("Failed to parse key map: {}", .{err});
                                 return;
                             };
 
-                            std.log.debug("Parsed key: key={} utf8='{s}' mods=(shift={} ctrl={} alt={})", .{
-                                key.key,
-                                key.utf8,
-                                key.mods.shift,
-                                key.mods.ctrl,
-                                key.mods.alt,
-                            });
-
-                            // Encode key using terminal state
                             var encode_buf: [32]u8 = undefined;
                             var writer = std.Io.Writer.fixed(&encode_buf);
 
@@ -710,8 +731,6 @@ const Client = struct {
                             pty_instance.terminal_mutex.unlock();
 
                             const encoded = writer.buffered();
-                            std.log.debug("Encoded key to {} bytes: {any}", .{ encoded.len, encoded });
-
                             if (encoded.len > 0) {
                                 _ = posix.write(pty_instance.process.master, encoded) catch |err| {
                                     std.log.err("Write to PTY failed: {}", .{err});
@@ -736,13 +755,11 @@ const Client = struct {
                         const mouse_map = notif.params.array[1];
 
                         if (self.server.ptys.get(session_id)) |pty_instance| {
-                            // Parse mouse map
                             const mouse = key_parse.parseMouseMap(mouse_map) catch |err| {
                                 std.log.err("Failed to parse mouse map: {}", .{err});
                                 return;
                             };
 
-                            // Encode mouse using terminal state
                             var encode_buf: [32]u8 = undefined;
                             var writer = std.Io.Writer.fixed(&encode_buf);
 
@@ -755,8 +772,6 @@ const Client = struct {
                             pty_instance.terminal_mutex.unlock();
 
                             const encoded = writer.buffered();
-                            // std.log.debug("Encoded mouse to {} bytes: {any}", .{ encoded.len, encoded });
-
                             if (encoded.len > 0) {
                                 _ = posix.write(pty_instance.process.master, encoded) catch |err| {
                                     std.log.err("Write to PTY failed: {}", .{err});
@@ -831,8 +846,8 @@ const Client = struct {
                             };
 
                             // Also resize the terminal state
+                            pty_instance.terminal_mutex.lock();
                             if (pty_instance.terminal.rows != rows or pty_instance.terminal.cols != cols) {
-                                pty_instance.terminal_mutex.lock();
                                 pty_instance.terminal.resize(
                                     pty_instance.allocator,
                                     cols,
@@ -840,10 +855,25 @@ const Client = struct {
                                 ) catch |err| {
                                     std.log.err("Resize terminal failed: {}", .{err});
                                 };
-                                pty_instance.terminal_mutex.unlock();
                             }
+                            // Update pixel dimensions for mouse encoding
+                            pty_instance.terminal.width_px = x_pixel;
+                            pty_instance.terminal.height_px = y_pixel;
 
-                            std.log.info("Resized session {} to {}x{} ({}x{}px)", .{ session_id, rows, cols, x_pixel, y_pixel });
+                            // Send in-band size report if mode 2048 is enabled
+                            if (pty_instance.terminal.modes.get(.in_band_size_reports)) {
+                                var report_buf: [64]u8 = undefined;
+                                const report = std.fmt.bufPrint(&report_buf, "\x1b[48;{};{};{};{}t", .{
+                                    rows,
+                                    cols,
+                                    y_pixel,
+                                    x_pixel,
+                                }) catch unreachable;
+                                _ = posix.write(pty_instance.process.master, report) catch |err| {
+                                    std.log.err("Failed to send in-band size report: {}", .{err});
+                                };
+                            }
+                            pty_instance.terminal_mutex.unlock();
                         } else {
                             std.log.warn("resize_pty notification: session {} not found", .{session_id});
                         }

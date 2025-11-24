@@ -8,6 +8,20 @@ pub fn encode(
     terminal: *const ghostty.Terminal,
 ) !void {
     const flags = terminal.flags;
+    const modes = terminal.modes;
+
+    std.log.debug("mouse_encode: event={s} format={s} x10={} normal={} button={} any={} utf8={} sgr={} urxvt={} sgr_pixels={}", .{
+        @tagName(flags.mouse_event),
+        @tagName(flags.mouse_format),
+        modes.get(.mouse_event_x10),
+        modes.get(.mouse_event_normal),
+        modes.get(.mouse_event_button),
+        modes.get(.mouse_event_any),
+        modes.get(.mouse_format_utf8),
+        modes.get(.mouse_format_sgr),
+        modes.get(.mouse_format_urxvt),
+        modes.get(.mouse_format_sgr_pixels),
+    });
 
     // Check if mouse reporting is enabled
     if (flags.mouse_event == .none) return;
@@ -23,20 +37,42 @@ pub fn encode(
 
     if (!report) return;
 
+    // Compute cell coordinates from float (floor)
+    const col: u16 = @intFromFloat(@max(0, @floor(event.x)));
+    const row: u16 = @intFromFloat(@max(0, @floor(event.y)));
+
     // SGR encoding (1006)
-    if (flags.mouse_format == .sgr or flags.mouse_format == .sgr_pixels) {
-        try encodeSGR(writer, event);
+    if (flags.mouse_format == .sgr) {
+        try encodeSGR(writer, col, row, event);
+        return;
+    }
+
+    // SGR pixels (1016) - compute pixel coordinates from float
+    if (flags.mouse_format == .sgr_pixels) {
+        const cell_width: f64 = if (terminal.cols > 0 and terminal.width_px > 0)
+            @as(f64, @floatFromInt(terminal.width_px)) / @as(f64, @floatFromInt(terminal.cols))
+        else
+            1.0;
+        const cell_height: f64 = if (terminal.rows > 0 and terminal.height_px > 0)
+            @as(f64, @floatFromInt(terminal.height_px)) / @as(f64, @floatFromInt(terminal.rows))
+        else
+            1.0;
+
+        const px_x: u16 = @intFromFloat(@max(0, @round(event.x * cell_width)));
+        const px_y: u16 = @intFromFloat(@max(0, @round(event.y * cell_height)));
+
+        try encodeSGR(writer, px_x, px_y, event);
         return;
     }
 
     // Fallback to X10/Normal (max 223 coords)
     // If coordinates are too large for X10, we skip reporting
-    if (event.col > 222 or event.row > 222) return;
+    if (col > 222 or row > 222) return;
 
-    try encodeX10(writer, event);
+    try encodeX10(writer, col, row, event);
 }
 
-fn encodeSGR(writer: anytype, event: key_parse.MouseEvent) !void {
+fn encodeSGR(writer: anytype, col: u16, row: u16, event: key_parse.MouseEvent) !void {
     var cb: u8 = 0;
 
     // Button mapping
@@ -67,10 +103,11 @@ fn encodeSGR(writer: anytype, event: key_parse.MouseEvent) !void {
     // Format: CSI < Cb ; Cx ; Cy M (or m for release)
     const char: u8 = if (event.type == .release) 'm' else 'M';
 
-    try writer.print("\x1b[<{};{};{}{c}", .{ cb, event.col + 1, event.row + 1, char });
+    std.log.debug("encodeSGR: col={} (sent {})", .{ col, col + 1 });
+    try writer.print("\x1b[<{};{};{}{c}", .{ cb, col + 1, row + 1, char });
 }
 
-fn encodeX10(writer: anytype, event: key_parse.MouseEvent) !void {
+fn encodeX10(writer: anytype, col: u16, row: u16, event: key_parse.MouseEvent) !void {
     var cb: u8 = 0;
     switch (event.button) {
         .left => cb = 0,
@@ -91,5 +128,5 @@ fn encodeX10(writer: anytype, event: key_parse.MouseEvent) !void {
     if (event.mods.alt) cb |= 8;
     if (event.mods.ctrl) cb |= 16;
 
-    try writer.print("\x1b[M{c}{c}{c}", .{ cb + 32, @as(u8, @intCast(event.col + 1)) + 32, @as(u8, @intCast(event.row + 1)) + 32 });
+    try writer.print("\x1b[M{c}{c}{c}", .{ cb + 32, @as(u8, @intCast(col + 1)) + 32, @as(u8, @intCast(row + 1)) + 32 });
 }

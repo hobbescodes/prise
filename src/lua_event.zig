@@ -7,6 +7,7 @@ const vaxis_helper = @import("vaxis_helper.zig");
 
 pub const Event = union(enum) {
     vaxis: vaxis.Event,
+    mouse: MouseEvent,
     pty_attach: struct {
         id: u32,
         surface: *Surface,
@@ -21,8 +22,20 @@ pub const Event = union(enum) {
     init: void,
 };
 
+pub const MouseEvent = struct {
+    x: f64,
+    y: f64,
+    button: vaxis.Mouse.Button,
+    action: vaxis.Mouse.Type,
+    mods: vaxis.Mouse.Modifiers,
+    target: ?u32, // PTY ID if hit, null otherwise
+    target_x: ?f64, // x relative to target widget
+    target_y: ?f64, // y relative to target widget
+};
+
 pub const KeyData = struct {
-    key: []const u8,
+    key: []const u8, // W3C "key" - the produced character/text
+    code: []const u8, // W3C "code" - the physical key name
     ctrl: bool,
     alt: bool,
     shift: bool,
@@ -30,8 +43,8 @@ pub const KeyData = struct {
 };
 
 pub const MouseData = struct {
-    col: u16,
-    row: u16,
+    x: f64,
+    y: f64,
     button: []const u8,
     event_type: []const u8,
     ctrl: bool,
@@ -93,22 +106,80 @@ pub fn pushEvent(lua: *ziglua.Lua, event: Event) !void {
             lua.setField(-2, "data");
         },
 
+        .mouse => |m| {
+            _ = lua.pushString("mouse");
+            lua.setField(-2, "type");
+
+            lua.createTable(0, 8);
+
+            lua.pushNumber(m.x);
+            lua.setField(-2, "x");
+
+            lua.pushNumber(m.y);
+            lua.setField(-2, "y");
+
+            switch (m.button) {
+                .left => _ = lua.pushString("left"),
+                .middle => _ = lua.pushString("middle"),
+                .right => _ = lua.pushString("right"),
+                .wheel_up => _ = lua.pushString("wheel_up"),
+                .wheel_down => _ = lua.pushString("wheel_down"),
+                .wheel_left => _ = lua.pushString("wheel_left"),
+                .wheel_right => _ = lua.pushString("wheel_right"),
+                else => _ = lua.pushString("none"),
+            }
+            lua.setField(-2, "button");
+
+            switch (m.action) {
+                .press => _ = lua.pushString("press"),
+                .release => _ = lua.pushString("release"),
+                .motion => _ = lua.pushString("motion"),
+                .drag => _ = lua.pushString("drag"),
+            }
+            lua.setField(-2, "action");
+
+            lua.createTable(0, 3);
+            lua.pushBoolean(m.mods.ctrl);
+            lua.setField(-2, "ctrl");
+            lua.pushBoolean(m.mods.alt);
+            lua.setField(-2, "alt");
+            lua.pushBoolean(m.mods.shift);
+            lua.setField(-2, "shift");
+            lua.setField(-2, "mods");
+
+            if (m.target) |target| {
+                lua.pushInteger(@intCast(target));
+                lua.setField(-2, "target");
+
+                if (m.target_x) |tx| {
+                    lua.pushNumber(tx);
+                    lua.setField(-2, "target_x");
+                }
+                if (m.target_y) |ty| {
+                    lua.pushNumber(ty);
+                    lua.setField(-2, "target_y");
+                }
+            }
+
+            lua.setField(-2, "data");
+        },
+
         .vaxis => |vaxis_event| switch (vaxis_event) {
             .key_press => |key| {
                 _ = lua.pushString("key_press");
                 lua.setField(-2, "type");
 
-                lua.createTable(0, 5);
+                lua.createTable(0, 6);
 
-                // Use shared helper to get proper key string (handles ArrowUp, etc)
-                // We need to allocate a string because pushString expects a slice
-                // We can use a temporary allocator for this
                 var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
                 defer arena.deinit();
-                const key_str = vaxis_helper.vaxisKeyToString(arena.allocator(), key) catch "Unidentified";
+                const key_strs = vaxis_helper.vaxisKeyToStrings(arena.allocator(), key) catch vaxis_helper.KeyStrings{ .key = "Unidentified", .code = "Unidentified" };
 
-                _ = lua.pushString(key_str);
+                _ = lua.pushString(key_strs.key);
                 lua.setField(-2, "key");
+
+                _ = lua.pushString(key_strs.code);
+                lua.setField(-2, "code");
 
                 lua.pushBoolean(key.mods.ctrl);
                 lua.setField(-2, "ctrl");
@@ -257,6 +328,9 @@ fn ptySendKey(lua: *ziglua.Lua) i32 {
     _ = lua.getField(2, "key");
     const key_str = lua.toString(-1) catch "";
 
+    _ = lua.getField(2, "code");
+    const code_str = lua.toString(-1) catch "";
+
     _ = lua.getField(2, "ctrl");
     const ctrl = lua.toBoolean(-1);
 
@@ -271,6 +345,7 @@ fn ptySendKey(lua: *ziglua.Lua) i32 {
 
     const key = KeyData{
         .key = key_str,
+        .code = code_str,
         .ctrl = ctrl,
         .alt = alt,
         .shift = shift,
@@ -279,11 +354,11 @@ fn ptySendKey(lua: *ziglua.Lua) i32 {
 
     pty.send_key_fn(pty.app, pty.id, key) catch |err| {
         // Clean up stack before error
-        lua.pop(5);
+        lua.pop(6);
         lua.raiseErrorStr("Failed to send key: %s", .{@errorName(err).ptr});
     };
 
-    lua.pop(5);
+    lua.pop(6);
     return 0;
 }
 
@@ -291,12 +366,12 @@ fn ptySendMouse(lua: *ziglua.Lua) i32 {
     const pty = lua.checkUserdata(PtyHandle, 1, "PrisePty");
     lua.checkType(2, .table);
 
-    _ = lua.getField(2, "col");
-    const col = @as(u16, @intCast(lua.toInteger(-1) catch 0));
+    _ = lua.getField(2, "x");
+    const x = lua.toNumber(-1) catch 0;
     lua.pop(1);
 
-    _ = lua.getField(2, "row");
-    const row = @as(u16, @intCast(lua.toInteger(-1) catch 0));
+    _ = lua.getField(2, "y");
+    const y = lua.toNumber(-1) catch 0;
     lua.pop(1);
 
     _ = lua.getField(2, "button");
@@ -327,8 +402,8 @@ fn ptySendMouse(lua: *ziglua.Lua) i32 {
     lua.pop(1); // Pop mods table
 
     const mouse = MouseData{
-        .col = col,
-        .row = row,
+        .x = x,
+        .y = y,
         .button = button,
         .event_type = event_type,
         .ctrl = ctrl,

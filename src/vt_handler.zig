@@ -226,11 +226,16 @@ pub const Handler = struct {
                 }
             },
 
+            .request_mode => {
+                try self.requestMode(value.mode);
+            },
+            .request_mode_unknown => {
+                try self.requestModeUnknown(value.mode, value.ansi);
+            },
+
             // Have no terminal-modifying effect
             .bell,
             .enquiry,
-            .request_mode,
-            .request_mode_unknown,
             .size_report,
             .xtversion,
             .device_status,
@@ -297,9 +302,22 @@ pub const Handler = struct {
 
             .synchronized_output,
             .linefeed,
-            .in_band_size_reports,
             .focus_event,
             => {},
+
+            .in_band_size_reports => {
+                // Send immediate size report when mode is enabled (or re-enabled)
+                if (enabled) {
+                    var buf: [64]u8 = undefined;
+                    const report = std.fmt.bufPrint(&buf, "\x1b[48;{};{};{};{}t", .{
+                        self.terminal.rows,
+                        self.terminal.cols,
+                        self.terminal.height_px,
+                        self.terminal.width_px,
+                    }) catch return;
+                    try self.write(report);
+                }
+            },
 
             .mouse_event_x10 => {
                 if (enabled) {
@@ -444,6 +462,68 @@ pub const Handler = struct {
                 .query => {},
             }
         }
+    }
+
+    fn requestMode(self: *Handler, mode: modes.Mode) !void {
+        const tag: modes.ModeTag = @bitCast(@intFromEnum(mode));
+
+        const code: u8 = switch (mode) {
+            // Modes handled by ghostty Terminal
+            .cursor_keys,
+            .cursor_visible,
+            .keypad_keys,
+            .origin,
+            .enable_left_and_right_margin,
+            .alt_screen_legacy,
+            .alt_screen,
+            .alt_screen_save_cursor_clear_enter,
+            .save_cursor,
+            .@"132_column",
+            .reverse_colors,
+            .grapheme_cluster,
+            => if (self.terminal.modes.get(mode)) 1 else 2,
+
+            // Modes we provide support for
+            .synchronized_output,
+            .in_band_size_reports,
+            .mouse_event_x10,
+            .mouse_event_normal,
+            .mouse_event_button,
+            .mouse_event_any,
+            .mouse_format_utf8,
+            .mouse_format_sgr,
+            .mouse_format_urxvt,
+            .mouse_format_sgr_pixels,
+            => if (self.terminal.modes.get(mode)) 1 else 2,
+
+            // Not recognized
+            else => 0,
+        };
+
+        var buf: [32]u8 = undefined;
+        const resp = std.fmt.bufPrint(
+            &buf,
+            "\x1B[{s}{};{}$y",
+            .{
+                if (tag.ansi) "" else "?",
+                tag.value,
+                code,
+            },
+        ) catch return;
+        try self.write(resp);
+    }
+
+    fn requestModeUnknown(self: *Handler, mode_raw: u16, ansi: bool) !void {
+        var buf: [32]u8 = undefined;
+        const resp = std.fmt.bufPrint(
+            &buf,
+            "\x1B[{s}{};0$y",
+            .{
+                if (ansi) "" else "?",
+                mode_raw,
+            },
+        ) catch return;
+        try self.write(resp);
     }
 };
 

@@ -16,6 +16,33 @@ pub const MsgId = enum(u16) {
     attach_pty = 2,
 };
 
+/// Map redraw MouseShape to vaxis Mouse.Shape
+fn mapMouseShapeToVaxis(shape: redraw.UIEvent.MouseShape.Shape) vaxis.Mouse.Shape {
+    return switch (shape) {
+        .default => .default,
+        .text => .text,
+        .pointer => .pointer,
+        .help => .help,
+        .progress => .progress,
+        .wait => .wait,
+        .cell => .cell,
+        .ew_resize, .col_resize => .@"ew-resize",
+        .ns_resize, .row_resize => .@"ns-resize",
+        // vaxis has limited shapes, map others to closest match
+        .crosshair,
+        .move,
+        .not_allowed,
+        .grab,
+        .grabbing,
+        .nesw_resize,
+        .nwse_resize,
+        .all_scroll,
+        .zoom_in,
+        .zoom_out,
+        => .default,
+    };
+}
+
 pub const UnixSocketClient = struct {
     allocator: std.mem.Allocator,
     fd: ?posix.fd_t = null,
@@ -321,16 +348,18 @@ pub const ClientLogic = struct {
                     return try msgpack.encode(allocator, .{"quit"});
                 }
 
-                // Build key map in JavaScript KeyboardEvent format
-                const key_str = try vaxis_helper.vaxisKeyToString(allocator, key);
-                defer allocator.free(key_str);
+                // Build key map in W3C KeyboardEvent format
+                const key_strs = try vaxis_helper.vaxisKeyToStrings(allocator, key);
+                defer allocator.free(key_strs.key);
+                defer allocator.free(key_strs.code);
 
-                var key_map_kv = try allocator.alloc(msgpack.Value.KeyValue, 5);
-                key_map_kv[0] = .{ .key = .{ .string = "key" }, .value = .{ .string = key_str } };
-                key_map_kv[1] = .{ .key = .{ .string = "shiftKey" }, .value = .{ .boolean = key.mods.shift } };
-                key_map_kv[2] = .{ .key = .{ .string = "ctrlKey" }, .value = .{ .boolean = key.mods.ctrl } };
-                key_map_kv[3] = .{ .key = .{ .string = "altKey" }, .value = .{ .boolean = key.mods.alt } };
-                key_map_kv[4] = .{ .key = .{ .string = "metaKey" }, .value = .{ .boolean = key.mods.super } };
+                var key_map_kv = try allocator.alloc(msgpack.Value.KeyValue, 6);
+                key_map_kv[0] = .{ .key = .{ .string = "key" }, .value = .{ .string = key_strs.key } };
+                key_map_kv[1] = .{ .key = .{ .string = "code" }, .value = .{ .string = key_strs.code } };
+                key_map_kv[2] = .{ .key = .{ .string = "shiftKey" }, .value = .{ .boolean = key.mods.shift } };
+                key_map_kv[3] = .{ .key = .{ .string = "ctrlKey" }, .value = .{ .boolean = key.mods.ctrl } };
+                key_map_kv[4] = .{ .key = .{ .string = "altKey" }, .value = .{ .boolean = key.mods.alt } };
+                key_map_kv[5] = .{ .key = .{ .string = "metaKey" }, .value = .{ .boolean = key.mods.super } };
 
                 const key_map_val = msgpack.Value{ .map = key_map_kv };
                 var arr = try allocator.alloc(msgpack.Value, 2);
@@ -384,6 +413,9 @@ pub const App = struct {
     // Terminal metrics
     cell_width_px: u16 = 0,
     cell_height_px: u16 = 0,
+
+    // Hit regions for mouse event targeting
+    hit_regions: []widget.HitRegion = &.{},
 
     pipe_read_fd: posix.fd_t = undefined,
     pipe_write_fd: posix.fd_t = undefined,
@@ -672,7 +704,55 @@ pub const App = struct {
     fn handleVaxisEvent(self: *App, event: vaxis.Event) !void {
         std.log.debug("handleVaxisEvent: {s}", .{@tagName(event)});
 
-        // Forward to Lua UI
+        // Handle mouse events specially - do hit testing and convert to MouseEvent
+        if (event == .mouse) {
+            const mouse = event.mouse;
+
+            // Convert pixel coordinates to cell coordinates as floats
+            const cell_w: f64 = if (self.cell_width_px > 0) @floatFromInt(self.cell_width_px) else 1.0;
+            const cell_h: f64 = if (self.cell_height_px > 0) @floatFromInt(self.cell_height_px) else 1.0;
+            const x: f64 = @as(f64, @floatFromInt(mouse.col)) / cell_w;
+            const y: f64 = @as(f64, @floatFromInt(mouse.row)) / cell_h;
+
+            const target = widget.hitTest(self.hit_regions, x, y);
+            var target_x: ?f64 = null;
+            var target_y: ?f64 = null;
+
+            if (target) |pty_id| {
+                if (widget.findRegion(self.hit_regions, pty_id)) |region| {
+                    target_x = x - @as(f64, @floatFromInt(region.x));
+                    target_y = y - @as(f64, @floatFromInt(region.y));
+                }
+                // Update mouse cursor shape based on target PTY's mouse_shape
+                if (self.surfaces.get(pty_id)) |surface| {
+                    const vaxis_shape = mapMouseShapeToVaxis(surface.mouse_shape);
+                    self.vx.setMouseShape(vaxis_shape);
+                }
+            } else {
+                // No target - reset to default
+                self.vx.setMouseShape(.default);
+            }
+
+            const mouse_event = lua_event.MouseEvent{
+                .x = x,
+                .y = y,
+                .button = mouse.button,
+                .action = mouse.type,
+                .mods = mouse.mods,
+                .target = target,
+                .target_x = target_x,
+                .target_y = target_y,
+            };
+
+            self.ui.update(.{ .mouse = mouse_event }) catch |err| {
+                if (err != error.NoUpdateFunction) {
+                    std.log.err("Lua UI update failed: {}", .{err});
+                }
+            };
+            return;
+        }
+
+        // Forward other events to Lua UI
         self.ui.update(.{ .vaxis = event }) catch |err| {
             // Ignore NoUpdateFunction, log others
             if (err != error.NoUpdateFunction) {
@@ -768,6 +848,8 @@ pub const App = struct {
             .cap_da1 => {
                 self.vx.queries_done.store(true, .unordered);
                 try self.vx.enableDetectedFeatures(self.tty.writer());
+                // Enable mouse mode (uses pixel coordinates if supported)
+                try self.vx.setMouseMode(self.tty.writer(), true);
                 // Send init event
                 self.ui.update(.init) catch |err| {
                     std.log.err("Failed to update UI with init: {}", .{err});
@@ -1035,6 +1117,12 @@ pub const App = struct {
         var w = root_widget;
         _ = w.layout(constraints);
 
+        // Collect hit regions for mouse event targeting
+        if (self.hit_regions.len > 0) {
+            self.allocator.free(self.hit_regions);
+        }
+        self.hit_regions = w.collectHitRegions(self.allocator, 0, 0) catch &.{};
+
         try self.renderWidget(w, win);
 
         // Log cursor state after render
@@ -1215,12 +1303,13 @@ pub const App = struct {
                                                 fn appSendDirect(ctx: *anyopaque, id: u32, key: lua_event.KeyData) anyerror!void {
                                                     const self: *App = @ptrCast(@alignCast(ctx));
 
-                                                    var key_map_kv = try self.allocator.alloc(msgpack.Value.KeyValue, 5);
+                                                    var key_map_kv = try self.allocator.alloc(msgpack.Value.KeyValue, 6);
                                                     key_map_kv[0] = .{ .key = .{ .string = "key" }, .value = .{ .string = key.key } };
-                                                    key_map_kv[1] = .{ .key = .{ .string = "shiftKey" }, .value = .{ .boolean = key.shift } };
-                                                    key_map_kv[2] = .{ .key = .{ .string = "ctrlKey" }, .value = .{ .boolean = key.ctrl } };
-                                                    key_map_kv[3] = .{ .key = .{ .string = "altKey" }, .value = .{ .boolean = key.alt } };
-                                                    key_map_kv[4] = .{ .key = .{ .string = "metaKey" }, .value = .{ .boolean = key.super } };
+                                                    key_map_kv[1] = .{ .key = .{ .string = "code" }, .value = .{ .string = key.code } };
+                                                    key_map_kv[2] = .{ .key = .{ .string = "shiftKey" }, .value = .{ .boolean = key.shift } };
+                                                    key_map_kv[3] = .{ .key = .{ .string = "ctrlKey" }, .value = .{ .boolean = key.ctrl } };
+                                                    key_map_kv[4] = .{ .key = .{ .string = "altKey" }, .value = .{ .boolean = key.alt } };
+                                                    key_map_kv[5] = .{ .key = .{ .string = "metaKey" }, .value = .{ .boolean = key.super } };
 
                                                     const key_map_val = msgpack.Value{ .map = key_map_kv };
 
@@ -1249,8 +1338,8 @@ pub const App = struct {
                                                     const self: *App = @ptrCast(@alignCast(ctx));
 
                                                     var mouse_map_kv = try self.allocator.alloc(msgpack.Value.KeyValue, 7);
-                                                    mouse_map_kv[0] = .{ .key = .{ .string = "col" }, .value = .{ .unsigned = mouse.col } };
-                                                    mouse_map_kv[1] = .{ .key = .{ .string = "row" }, .value = .{ .unsigned = mouse.row } };
+                                                    mouse_map_kv[0] = .{ .key = .{ .string = "x" }, .value = .{ .float = mouse.x } };
+                                                    mouse_map_kv[1] = .{ .key = .{ .string = "y" }, .value = .{ .float = mouse.y } };
                                                     mouse_map_kv[2] = .{ .key = .{ .string = "button" }, .value = .{ .string = mouse.button } };
                                                     mouse_map_kv[3] = .{ .key = .{ .string = "event_type" }, .value = .{ .string = mouse.event_type } };
                                                     mouse_map_kv[4] = .{ .key = .{ .string = "shiftKey" }, .value = .{ .boolean = mouse.shift } };
@@ -1284,9 +1373,9 @@ pub const App = struct {
                                         std.log.err("Failed to update UI with pty_attach: {}", .{err});
                                     };
 
-                                    std.log.info("Sending initial resize: {}x{}", .{ surface.rows, surface.cols });
                                     const width_px = @as(u16, surface.cols) * app.cell_width_px;
                                     const height_px = @as(u16, surface.rows) * app.cell_height_px;
+                                    std.log.info("Sending initial resize: {}x{} ({}x{}px, cell={}x{})", .{ surface.rows, surface.cols, width_px, height_px, app.cell_width_px, app.cell_height_px });
                                     const resize_msg = try msgpack.encode(app.allocator, .{
                                         2, // notification
                                         "resize_pty",

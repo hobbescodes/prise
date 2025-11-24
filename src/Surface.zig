@@ -11,6 +11,7 @@ allocator: std.mem.Allocator,
 rows: u16,
 cols: u16,
 cursor_shape: redraw.UIEvent.CursorShape.Shape = .block,
+mouse_shape: redraw.UIEvent.MouseShape.Shape = .default,
 dirty: bool = false,
 hl_attrs: std.AutoHashMap(u32, vaxis.Style),
 title: std.ArrayList(u8),
@@ -156,6 +157,17 @@ pub fn applyRedraw(self: *Surface, params: msgpack.Value) !void {
             self.title.clearRetainingCapacity();
             try self.title.appendSlice(self.allocator, title_text);
             self.dirty = true;
+        } else if (std.mem.eql(u8, event_name.string, "mouse_shape")) {
+            if (event_params.array.len < 2) continue;
+
+            // args: [pty, shape]
+            const shape_int = switch (event_params.array[1]) {
+                .unsigned => |u| @as(u8, @intCast(u)),
+                .integer => |i| @as(u8, @intCast(i)),
+                else => continue,
+            };
+
+            self.mouse_shape = @enumFromInt(shape_int);
         } else if (std.mem.eql(u8, event_name.string, "write")) {
             if (event_params.array.len < 4) continue;
 

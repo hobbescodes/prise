@@ -514,6 +514,29 @@ function M.update(event)
             end
         end
         prise.request_frame()
+    elseif event.type == "mouse" then
+        local d = event.data
+        if d.action == "press" and d.button == "left" then
+            -- Focus the clicked pane
+            if d.target then
+                state.focused_id = d.target
+                prise.request_frame()
+            end
+        end
+        -- Forward mouse events to the target PTY if there is one
+        if d.target and state.root then
+            local path = find_node_path(state.root, d.target)
+            if path then
+                local pane = path[#path]
+                pane.pty:send_mouse({
+                    x = d.target_x or 0,
+                    y = d.target_y or 0,
+                    button = d.button,
+                    event_type = d.action,
+                    mods = d.mods,
+                })
+            end
+        end
     elseif event.type == "winsize" then
         prise.request_frame()
     end
