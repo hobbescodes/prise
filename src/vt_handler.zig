@@ -233,13 +233,19 @@ pub const Handler = struct {
                 try self.requestModeUnknown(value.mode, value.ansi);
             },
 
+            .kitty_keyboard_query => {
+                const flags = self.terminal.screens.active.kitty_keyboard.current();
+                var buf: [32]u8 = undefined;
+                const resp = std.fmt.bufPrint(&buf, "\x1b[?{}u", .{flags.int()}) catch return;
+                try self.write(resp);
+            },
+
             // Have no terminal-modifying effect
             .bell,
             .enquiry,
             .size_report,
             .xtversion,
             .device_status,
-            .kitty_keyboard_query,
             .report_pwd,
             .show_desktop_notification,
             .progress_report,

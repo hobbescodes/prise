@@ -163,10 +163,26 @@ pub fn parseKeyMap(map: msgpack.Value) !KeyEvent {
     // If key equals code (e.g., "Backspace" == "Backspace"), it's a named key with no character
     const utf8 = if (std.mem.eql(u8, key, code)) "" else key;
 
+    // For kitty keyboard protocol, we need unshifted_codepoint for character keys.
+    // This is used by the encoder to generate CSI u sequences.
+    // For letter keys, derive from the key enum. Otherwise use the first UTF-8 codepoint.
+    const unshifted_codepoint: u21 = key_enum.codepoint() orelse codepoint: {
+        if (utf8.len == 0) break :codepoint 0;
+        const view = std.unicode.Utf8View.init(utf8) catch break :codepoint 0;
+        var it = view.iterator();
+        const cp = it.nextCodepoint() orelse break :codepoint 0;
+        // If shift is held, try to get the lowercase version for letters
+        if (mods.shift and cp >= 'A' and cp <= 'Z') {
+            break :codepoint std.ascii.toLower(@intCast(cp));
+        }
+        break :codepoint cp;
+    };
+
     return .{
         .key = key_enum,
         .utf8 = utf8,
         .mods = @bitCast(mods),
+        .unshifted_codepoint = unshifted_codepoint,
     };
 }
 
