@@ -559,6 +559,7 @@ fn buildRedrawMessageFromPty(
                 .grapheme = text,
                 .style_id = hl_id_to_send,
                 .repeat = if (repeat > 1) @intCast(repeat) else null,
+                .width = if (raw_cell.wide == .wide) 2 else null,
             });
 
             x = next_x;

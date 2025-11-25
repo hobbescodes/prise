@@ -50,6 +50,7 @@ pub const UIEvent = union(enum) {
             grapheme: []const u8,
             style_id: ?u32 = null, // omitted = reuse previous
             repeat: ?u32 = null, // omitted = 1
+            width: ?u8 = null, // omitted = 1, 2 = wide char
         };
     };
 
@@ -211,6 +212,18 @@ pub const RedrawBuilder = struct {
                     try cell_items.insert(arena, 1, msgpack.Value.nil);
                 }
                 try cell_items.append(arena, msgpack.Value{ .unsigned = rep });
+            }
+
+            // Include width if present (for wide chars)
+            if (cell.width) |w| {
+                // Need placeholders for style_id and repeat if not present
+                if (cell.style_id == null and cell.repeat == null) {
+                    try cell_items.append(arena, msgpack.Value.nil); // style_id placeholder
+                    try cell_items.append(arena, msgpack.Value.nil); // repeat placeholder
+                } else if (cell.repeat == null) {
+                    try cell_items.append(arena, msgpack.Value.nil); // repeat placeholder
+                }
+                try cell_items.append(arena, msgpack.Value{ .unsigned = w });
             }
 
             cells_arr[i] = msgpack.Value{ .array = try cell_items.toOwnedSlice(arena) };

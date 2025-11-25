@@ -292,17 +292,26 @@ pub fn applyRedraw(self: *Surface, params: msgpack.Value) !void {
                 else
                     1;
 
+                const width: usize = if (cell.array.len > 3 and cell.array[3] != .nil)
+                    switch (cell.array[3]) {
+                        .unsigned => |u| @intCast(u),
+                        .integer => |i| @intCast(i),
+                        else => 1,
+                    }
+                else
+                    1;
+
                 const style = self.hl_attrs.get(current_hl) orelse vaxis.Style{};
 
                 var i: usize = 0;
                 while (i < repeat) : (i += 1) {
                     if (col < self.cols and row < self.rows) {
                         self.back.writeCell(@intCast(col), @intCast(row), .{
-                            .char = .{ .grapheme = text },
+                            .char = .{ .grapheme = text, .width = @intCast(width) },
                             .style = style,
                         });
                     }
-                    col += 1;
+                    col += width;
                 }
             }
             self.dirty = true;
