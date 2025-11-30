@@ -278,16 +278,8 @@ const Pty = struct {
         self.exit_status.store(status, .seq_cst);
         self.exited.store(true, .seq_cst);
 
-        // Signal main thread about exit
-        while (true) {
-            _ = posix.write(self.pipe_fds[1], "e") catch |err| {
-                if (err == error.WouldBlock) {
-                    std.Thread.sleep(1 * std.time.ns_per_ms);
-                    continue;
-                }
-            };
-            break;
-        }
+        // Signal main thread about exit (best-effort, non-blocking)
+        _ = posix.write(self.pipe_fds[1], "e") catch {};
     }
 };
 
