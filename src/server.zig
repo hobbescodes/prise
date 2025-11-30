@@ -289,8 +289,9 @@ const Pty = struct {
         }
         log.info("PTY read thread exiting for PTY {} (running={})", .{ self.id, self.running.load(.seq_cst) });
 
-        // Reap the child process (use WNOHANG with retries, resending SIGHUP like Ghostty)
+        // Reap the child process (use WNOHANG with retries, escalating signals)
         var status: u32 = 0;
+        var attempts: u32 = 0;
         while (true) {
             const result = posix.waitpid(self.process.pid, posix.W.NOHANG);
             if (result.pid != 0) {
@@ -298,9 +299,18 @@ const Pty = struct {
                 log.info("PTY {} process {} exited with status {}", .{ self.id, self.process.pid, status });
                 break;
             }
-            // Process still alive, send SIGHUP to terminate it
-            log.info("PTY {} process {} still alive, sending SIGHUP", .{ self.id, self.process.pid });
-            _ = posix.kill(-self.process.pid, posix.SIG.HUP) catch {};
+            // Escalate signals: SIGHUP -> SIGTERM -> SIGKILL
+            if (attempts < 5) {
+                log.info("PTY {} process {} still alive, sending HUP", .{ self.id, self.process.pid });
+                _ = posix.kill(-self.process.pid, posix.SIG.HUP) catch {};
+            } else if (attempts < 10) {
+                log.info("PTY {} process {} still alive, sending TERM", .{ self.id, self.process.pid });
+                _ = posix.kill(-self.process.pid, posix.SIG.TERM) catch {};
+            } else {
+                log.info("PTY {} process {} still alive, sending KILL", .{ self.id, self.process.pid });
+                _ = posix.kill(-self.process.pid, posix.SIG.KILL) catch {};
+            }
+            attempts += 1;
             std.Thread.sleep(10 * std.time.ns_per_ms);
         }
 
