@@ -659,6 +659,7 @@ const Client = struct {
     fd: posix.fd_t,
     server: *Server,
     recv_buffer: [4096]u8 = undefined,
+    msg_buffer: std.ArrayList(u8),
     send_buffer: ?[]u8 = null,
     send_offset: usize = 0,
     send_queue: std.ArrayList([]u8),
@@ -757,6 +758,7 @@ const Client = struct {
             allocator.free(buf);
         }
         self.send_queue.deinit(allocator);
+        self.msg_buffer.deinit(allocator);
         self.attached_sessions.deinit(allocator);
 
         // Remove from server's client list
@@ -779,10 +781,7 @@ const Client = struct {
         server.checkExit() catch {};
     }
 
-    fn handleMessage(self: *Client, loop: *io.Loop, data: []const u8) !void {
-        const msg = try rpc.decodeMessage(self.server.allocator, data);
-        defer msg.deinit(self.server.allocator);
-
+    fn processMessage(self: *Client, loop: *io.Loop, msg: rpc.Message) !void {
         switch (msg) {
             .request => |req| {
                 // std.log.info("Got request: msgid={} method={s}", .{ req.msgid, req.method });
@@ -1239,6 +1238,7 @@ const Client = struct {
 
     fn onRecv(loop: *io.Loop, completion: io.Completion) anyerror!void {
         const client = completion.userdataCast(Client);
+        const allocator = client.server.allocator;
 
         switch (completion.result) {
             .recv => |bytes_read| {
@@ -1246,20 +1246,48 @@ const Client = struct {
                     // EOF - client disconnected
                     log.debug("Client fd={} disconnected (EOF)", .{client.fd});
                     client.server.removeClient(client);
-                } else {
-                    log.debug("Received {} bytes from client fd={}", .{ bytes_read, client.fd });
-                    // Got data, try to parse as RPC message
-                    const data = client.recv_buffer[0..bytes_read];
-                    client.handleMessage(loop, data) catch |err| {
-                        log.err("Failed to handle message: {}", .{err});
+                    return;
+                }
+
+                log.debug("Received {} bytes from client fd={}", .{ bytes_read, client.fd });
+
+                // Accumulate received data
+                client.msg_buffer.appendSlice(allocator, client.recv_buffer[0..bytes_read]) catch |err| {
+                    log.err("Failed to append to msg_buffer: {}", .{err});
+                    client.server.removeClient(client);
+                    return;
+                };
+
+                // Process all complete messages in the buffer
+                while (client.msg_buffer.items.len > 0) {
+                    const result = rpc.decodeMessageWithSize(allocator, client.msg_buffer.items) catch |err| {
+                        if (err == error.EndOfStream) {
+                            // Incomplete message, wait for more data
+                            break;
+                        }
+                        log.err("Failed to decode message: {}", .{err});
+                        client.server.removeClient(client);
+                        return;
+                    };
+                    defer result.message.deinit(allocator);
+
+                    client.processMessage(loop, result.message) catch |err| {
+                        log.err("Failed to process message: {}", .{err});
                     };
 
-                    // Keep receiving
-                    _ = try loop.recv(client.fd, &client.recv_buffer, .{
-                        .ptr = client,
-                        .cb = onRecv,
-                    });
+                    // Remove consumed bytes from buffer
+                    const remaining = client.msg_buffer.items.len - result.bytes_consumed;
+                    if (remaining > 0) {
+                        std.mem.copyForwards(u8, client.msg_buffer.items[0..remaining], client.msg_buffer.items[result.bytes_consumed..]);
+                    }
+                    client.msg_buffer.shrinkRetainingCapacity(remaining);
                 }
+
+                // Keep receiving
+                _ = try loop.recv(client.fd, &client.recv_buffer, .{
+                    .ptr = client,
+                    .cb = onRecv,
+                });
             },
             .err => {
                 log.debug("Client fd={} disconnected (error)", .{client.fd});
@@ -1786,6 +1814,7 @@ const Server = struct {
                 client.* = .{
                     .fd = client_fd,
                     .server = self,
+                    .msg_buffer = std.ArrayList(u8).empty,
                     .send_queue = std.ArrayList([]u8).empty,
                     .attached_sessions = std.ArrayList(usize).empty,
                     // .style_cache = std.AutoHashMap(u16, redraw.UIEvent.Style.Attributes).init(self.allocator),
@@ -2637,6 +2666,7 @@ test "server - pty exit notification" {
     client.* = .{
         .fd = 200,
         .server = &server,
+        .msg_buffer = std.ArrayList(u8).empty,
         .send_queue = std.ArrayList([]u8).empty,
         .attached_sessions = std.ArrayList(usize).empty,
     };
