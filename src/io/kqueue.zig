@@ -309,8 +309,9 @@ pub const Loop = struct {
 
         // Try to remove from kqueue by sending EV_DELETE
         // Note: may fail if event was ONESHOT and already fired
+        const ident: usize = if (op.kind == .timer) id else @intCast(op.fd);
         var changes = [_]posix.Kevent{.{
-            .ident = @intCast(op.fd),
+            .ident = ident,
             .filter = switch (op.kind) {
                 .read, .recv, .accept => c.EVFILT.READ,
                 .send, .connect => c.EVFILT.WRITE,
