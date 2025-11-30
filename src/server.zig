@@ -81,6 +81,12 @@ const Pty = struct {
     server_ptr: *anyopaque = undefined,
 
     fn init(allocator: std.mem.Allocator, id: usize, process_instance: pty.Process, size: pty.winsize) !*Pty {
+        // Precondition: terminal size must be positive (zero would crash ghostty-vt)
+        std.debug.assert(size.ws_col > 0);
+        std.debug.assert(size.ws_row > 0);
+        // Precondition: process must have valid master fd
+        std.debug.assert(process_instance.master >= 0);
+
         const instance = try allocator.create(Pty);
         errdefer allocator.destroy(instance);
 
@@ -112,6 +118,11 @@ const Pty = struct {
             .exit_pipe_fds = exit_pipe_fds,
             .render_state = .empty,
         };
+
+        // Postcondition: instance initialized in running state with no clients
+        std.debug.assert(instance.running.load(.seq_cst) == true);
+        std.debug.assert(instance.clients.items.len == 0);
+
         return instance;
     }
 
@@ -142,6 +153,11 @@ const Pty = struct {
 
     /// Join read thread and free resources (call after event loop exits)
     fn joinAndFree(self: *Pty, allocator: std.mem.Allocator) void {
+        // Precondition: all clients must be detached before freeing
+        std.debug.assert(self.clients.items.len == 0);
+        // Precondition: running flag must be false (stopAndCancelIO was called)
+        std.debug.assert(!self.running.load(.seq_cst));
+
         if (self.read_thread) |thread| {
             thread.join();
         }
@@ -168,21 +184,45 @@ const Pty = struct {
     }
 
     fn deinit(self: *Pty, allocator: std.mem.Allocator, loop: *io.Loop) void {
+        // Precondition: all clients must be detached before deinit
+        std.debug.assert(self.clients.items.len == 0);
+
         self.stopAndCancelIO(loop);
         self.joinAndFree(allocator);
     }
 
     fn addClient(self: *Pty, allocator: std.mem.Allocator, client: *Client) !void {
+        // Precondition: PTY must be running to accept new clients
+        std.debug.assert(self.running.load(.seq_cst));
+        // Precondition: client must not already be attached (no duplicates)
+        for (self.clients.items) |c| {
+            std.debug.assert(c != client);
+        }
+        // Precondition: must not exceed client limit
+        std.debug.assert(self.clients.items.len < LIMITS.CLIENTS_MAX);
+
+        const prev_len = self.clients.items.len;
         try self.clients.append(allocator, client);
+
+        // Postcondition: client count increased by exactly one
+        std.debug.assert(self.clients.items.len == prev_len + 1);
     }
 
     fn removeClient(self: *Pty, client: *Client) void {
+        const prev_len = self.clients.items.len;
+        // Precondition: must have at least one client to remove
+        std.debug.assert(prev_len > 0);
+
         for (self.clients.items, 0..) |c, i| {
             if (c == client) {
                 _ = self.clients.swapRemove(i);
+                // Postcondition: client count decreased by exactly one
+                std.debug.assert(self.clients.items.len == prev_len - 1);
                 return;
             }
         }
+        // If we reach here, client was not found - this is a bug
+        unreachable;
     }
 
     fn setTitle(self: *Pty, title: []const u8) !void {
@@ -201,6 +241,11 @@ const Pty = struct {
 
     fn readThread(self: *Pty, server: *Server) void {
         _ = server;
+        // Precondition: PTY must be in running state when thread starts
+        std.debug.assert(self.running.load(.seq_cst));
+        // Precondition: process master fd must be valid
+        std.debug.assert(self.process.master >= 0);
+
         var buffer: [4096]u8 = undefined;
 
         var handler = vt_handler.Handler.init(&self.terminal);
@@ -323,6 +368,9 @@ const Pty = struct {
 
         self.exit_status.store(status, .seq_cst);
         self.exited.store(true, .seq_cst);
+
+        // Postcondition: exited flag must be set before signaling main thread
+        std.debug.assert(self.exited.load(.seq_cst));
 
         // Signal main thread about exit (best-effort, non-blocking)
         _ = posix.write(self.pipe_fds[1], "e") catch {};
@@ -2131,6 +2179,8 @@ const Server = struct {
                     // Render final frame
                     server.renderFrame(pty_instance);
                     // Remove from server's pty map and clean up
+                    // Ensure running is false before cleanup (read thread sets it, but be explicit)
+                    pty_instance.running.store(false, .seq_cst);
                     // Cancel pending IO and timers before freeing (process already exited)
                     _ = server.ptys.fetchRemove(pty_instance.id);
                     pty_instance.cancelPendingIO(loop);
