@@ -15,12 +15,14 @@ pub const Event = union(enum) {
     vaxis: vaxis.Event,
     mouse: MouseEvent,
     split_resize: SplitResizeEvent,
+    paste: []const u8,
     pty_attach: struct {
         id: u32,
         surface: *Surface,
         app: *anyopaque,
         send_key_fn: *const fn (app: *anyopaque, id: u32, key: KeyData) anyerror!void,
         send_mouse_fn: *const fn (app: *anyopaque, id: u32, mouse: MouseData) anyerror!void,
+        send_paste_fn: *const fn (app: *anyopaque, id: u32, data: []const u8) anyerror!void,
         close_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
     },
     pty_exited: struct {
@@ -98,6 +100,7 @@ pub fn pushEvent(lua: *ziglua.Lua, event: Event) !void {
                 .app = info.app,
                 .send_key_fn = info.send_key_fn,
                 .send_mouse_fn = info.send_mouse_fn,
+                .send_paste_fn = info.send_paste_fn,
                 .close_fn = info.close_fn,
             };
 
@@ -119,6 +122,16 @@ pub fn pushEvent(lua: *ziglua.Lua, event: Event) !void {
             lua.setField(-2, "id");
             lua.pushInteger(@intCast(info.status));
             lua.setField(-2, "status");
+            lua.setField(-2, "data");
+        },
+
+        .paste => |data| {
+            _ = lua.pushString("paste");
+            lua.setField(-2, "type");
+
+            lua.createTable(0, 1);
+            _ = lua.pushString(data);
+            lua.setField(-2, "text");
             lua.setField(-2, "data");
         },
 
@@ -311,6 +324,7 @@ const PtyHandle = struct {
     app: *anyopaque,
     send_key_fn: *const fn (app: *anyopaque, id: u32, key: KeyData) anyerror!void,
     send_mouse_fn: *const fn (app: *anyopaque, id: u32, mouse: MouseData) anyerror!void,
+    send_paste_fn: *const fn (app: *anyopaque, id: u32, data: []const u8) anyerror!void,
     close_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
 };
 
@@ -330,6 +344,10 @@ fn ptyIndex(lua: *ziglua.Lua) i32 {
     }
     if (std.mem.eql(u8, key, "send_mouse")) {
         lua.pushFunction(ziglua.wrap(ptySendMouse));
+        return 1;
+    }
+    if (std.mem.eql(u8, key, "send_paste")) {
+        lua.pushFunction(ziglua.wrap(ptySendPaste));
         return 1;
     }
     if (std.mem.eql(u8, key, "close")) {
@@ -466,6 +484,17 @@ fn ptySendMouse(lua: *ziglua.Lua) i32 {
     return 0;
 }
 
+fn ptySendPaste(lua: *ziglua.Lua) i32 {
+    const pty = lua.checkUserdata(PtyHandle, 1, "PrisePty");
+    const data = lua.toString(2) catch {
+        lua.raiseErrorStr("Expected string for paste data", .{});
+    };
+    pty.send_paste_fn(pty.app, pty.id, data) catch |err| {
+        lua.raiseErrorStr("Failed to send paste: %s", .{@errorName(err).ptr});
+    };
+    return 0;
+}
+
 fn ptyClose(lua: *ziglua.Lua) i32 {
     const pty = lua.checkUserdata(PtyHandle, 1, "PrisePty");
     pty.close_fn(pty.app, pty.id) catch |err| {
@@ -572,6 +601,7 @@ pub fn pushPtyUserdata(
     app: *anyopaque,
     send_key_fn: *const fn (app: *anyopaque, id: u32, key: KeyData) anyerror!void,
     send_mouse_fn: *const fn (app: *anyopaque, id: u32, mouse: MouseData) anyerror!void,
+    send_paste_fn: *const fn (app: *anyopaque, id: u32, data: []const u8) anyerror!void,
     close_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
 ) !void {
     const pty = lua.newUserdata(PtyHandle, @sizeOf(PtyHandle));
@@ -581,6 +611,7 @@ pub fn pushPtyUserdata(
         .app = app,
         .send_key_fn = send_key_fn,
         .send_mouse_fn = send_mouse_fn,
+        .send_paste_fn = send_paste_fn,
         .close_fn = close_fn,
     };
 

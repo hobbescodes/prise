@@ -783,6 +783,61 @@ pub const App = struct {
     fn handleVaxisEvent(self: *App, event: vaxis.Event) !void {
         log.debug("handleVaxisEvent: {s}", .{@tagName(event)});
 
+        // Handle paste mode: buffer key presses between paste_start and paste_end
+        if (event == .paste_start) {
+            log.debug("paste_start received", .{});
+            self.paste_buffer = .empty;
+            return;
+        }
+
+        if (event == .paste_end) {
+            log.debug("paste_end received", .{});
+            if (self.paste_buffer) |*buf| {
+                log.debug("sending paste event to lua: {} bytes", .{buf.items.len});
+                self.ui.update(.{ .paste = buf.items }) catch |err| {
+                    if (err != error.NoUpdateFunction) {
+                        log.err("Lua UI update failed: {}", .{err});
+                    }
+                };
+                buf.deinit(self.allocator);
+            }
+            self.paste_buffer = null;
+            return;
+        }
+
+        // If we're in paste mode, buffer key presses instead of forwarding
+        if (self.paste_buffer != null and event == .key_press) {
+            const key = event.key_press;
+            if (self.paste_buffer) |*buf| {
+                // Handle special keys (enter, tab)
+                // Control characters come as Ctrl+letter: Ctrl+J=LF, Ctrl+M=CR, Ctrl+I=Tab
+                const is_newline = key.codepoint == vaxis.Key.enter or
+                    key.codepoint == '\r' or
+                    key.codepoint == '\n' or
+                    (key.codepoint == 'j' and key.mods.ctrl) or
+                    (key.codepoint == 'm' and key.mods.ctrl);
+                if (is_newline) {
+                    buf.appendSlice(self.allocator, "\n") catch |err| {
+                        log.err("Failed to append paste data: {}", .{err});
+                    };
+                } else if (key.codepoint == vaxis.Key.tab or key.codepoint == '\t' or (key.codepoint == 'i' and key.mods.ctrl)) {
+                    buf.appendSlice(self.allocator, "\t") catch |err| {
+                        log.err("Failed to append paste data: {}", .{err});
+                    };
+                } else if (key.text) |text| {
+                    // Regular text input
+                    if (buf.items.len + text.len <= MAX_PASTE_SIZE) {
+                        buf.appendSlice(self.allocator, text) catch |err| {
+                            log.err("Failed to append paste data: {}", .{err});
+                        };
+                    } else {
+                        log.warn("Paste data exceeds maximum size of {} bytes, truncating", .{MAX_PASTE_SIZE});
+                    }
+                }
+            }
+            return;
+        }
+
         // Handle mouse events specially - do hit testing and convert to MouseEvent
         if (event == .mouse) {
             const mouse = event.mouse;
@@ -1010,29 +1065,7 @@ pub const App = struct {
                     else => {},
                 }
             },
-            .paste_start => {
-                self.paste_buffer = .empty;
-            },
-            .paste => |data| {
-                if (self.paste_buffer) |*buf| {
-                    if (buf.items.len + data.len <= MAX_PASTE_SIZE) {
-                        buf.appendSlice(self.allocator, data) catch |err| {
-                            log.err("Failed to append paste data: {}", .{err});
-                        };
-                    } else {
-                        log.warn("Paste data exceeds maximum size of {} bytes, truncating", .{MAX_PASTE_SIZE});
-                    }
-                }
-            },
-            .paste_end => {
-                if (self.paste_buffer) |*buf| {
-                    self.sendPaste(buf.items) catch |err| {
-                        log.err("Failed to send paste: {}", .{err});
-                    };
-                    buf.deinit(self.allocator);
-                }
-                self.paste_buffer = null;
-            },
+
             else => {},
         }
     }
@@ -1063,27 +1096,6 @@ pub const App = struct {
             };
             log.info("Surface initialized: {}x{}", .{ cols, rows });
         }
-    }
-
-    fn sendPaste(self: *App, data: []const u8) !void {
-        const pty_id = self.state.pty_id orelse return;
-
-        var params = try self.allocator.alloc(msgpack.Value, 2);
-        defer self.allocator.free(params);
-        params[0] = .{ .integer = pty_id };
-        params[1] = .{ .binary = data };
-
-        var arr = try self.allocator.alloc(msgpack.Value, 3);
-        defer self.allocator.free(arr);
-        arr[0] = .{ .unsigned = 2 }; // notification
-        arr[1] = .{ .string = "paste_input" };
-        arr[2] = .{ .array = params };
-
-        const msg = try msgpack.encodeFromValue(self.allocator, .{ .array = arr });
-        defer self.allocator.free(msg);
-
-        try self.sendDirect(msg);
-        log.debug("Sent paste_input: {} bytes to pty {}", .{ data.len, pty_id });
     }
 
     pub fn sendResize(self: *App, pty_id: u32, rows: u16, cols: u16) !void {
@@ -1737,6 +1749,29 @@ pub const App = struct {
                                                         try self.sendDirect(encoded_msg);
                                                     }
                                                 }.appSendMouse,
+                                                .send_paste_fn = struct {
+                                                    fn appSendPaste(ctx: *anyopaque, id: u32, data: []const u8) anyerror!void {
+                                                        const self: *App = @ptrCast(@alignCast(ctx));
+
+                                                        var params = try self.allocator.alloc(msgpack.Value, 2);
+                                                        params[0] = .{ .unsigned = @intCast(id) };
+                                                        params[1] = .{ .binary = data };
+
+                                                        var arr = try self.allocator.alloc(msgpack.Value, 3);
+                                                        arr[0] = .{ .unsigned = 2 }; // notification
+                                                        arr[1] = .{ .string = "paste_input" };
+                                                        arr[2] = .{ .array = params };
+
+                                                        const encoded_msg = try msgpack.encodeFromValue(self.allocator, .{ .array = arr });
+                                                        defer self.allocator.free(encoded_msg);
+
+                                                        self.allocator.free(arr);
+                                                        self.allocator.free(params);
+
+                                                        try self.sendDirect(encoded_msg);
+                                                        log.debug("Sent paste_input: {} bytes to pty {}", .{ data.len, id });
+                                                    }
+                                                }.appSendPaste,
                                                 .close_fn = struct {
                                                     fn appClosePty(ctx: *anyopaque, id: u32) anyerror!void {
                                                         const self: *App = @ptrCast(@alignCast(ctx));
@@ -2063,6 +2098,29 @@ pub const App = struct {
                     try app.sendDirect(encoded_msg);
                 }
             }.sendMouse,
+            .send_paste_fn = struct {
+                fn sendPaste(app_ctx: *anyopaque, pty_id: u32, data: []const u8) anyerror!void {
+                    const app: *App = @ptrCast(@alignCast(app_ctx));
+
+                    var params = try app.allocator.alloc(msgpack.Value, 2);
+                    params[0] = .{ .unsigned = @intCast(pty_id) };
+                    params[1] = .{ .binary = data };
+
+                    var arr = try app.allocator.alloc(msgpack.Value, 3);
+                    arr[0] = .{ .unsigned = 2 }; // notification
+                    arr[1] = .{ .string = "paste_input" };
+                    arr[2] = .{ .array = params };
+
+                    const encoded_msg = try msgpack.encodeFromValue(app.allocator, .{ .array = arr });
+                    defer app.allocator.free(encoded_msg);
+
+                    app.allocator.free(arr);
+                    app.allocator.free(params);
+
+                    try app.sendDirect(encoded_msg);
+                    log.debug("Sent paste_input: {} bytes to pty {}", .{ data.len, pty_id });
+                }
+            }.sendPaste,
             .close_fn = struct {
                 fn closePty(app_ctx: *anyopaque, pty_id: u32) anyerror!void {
                     const app: *App = @ptrCast(@alignCast(app_ctx));

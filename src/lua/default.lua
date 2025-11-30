@@ -880,6 +880,21 @@ function M.update(event)
                 pane.pty:send_key(data)
             end
         end
+    elseif event.type == "paste" then
+        if state.palette.visible then
+            -- Insert into command palette, replacing newlines/tabs with spaces
+            local text = event.data.text:gsub("[\r\n\t]", " ")
+            state.palette.input:insert(text)
+            state.palette.selected = 1
+            prise.request_frame()
+        elseif state.root and state.focused_id then
+            -- Forward paste to focused PTY
+            local path = find_node_path(state.root, state.focused_id)
+            if path then
+                local pane = path[#path]
+                pane.pty:send_paste(event.data.text)
+            end
+        end
     elseif event.type == "pty_exited" then
         local id = event.data.id
         prise.log.info("Lua: pty_exited " .. id)

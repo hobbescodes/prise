@@ -43,6 +43,22 @@ fn signalHandler(sig: c_int) callconv(std.builtin.CallingConvention.c) void {
     _ = posix.write(signal_write_fd, "s") catch {};
 }
 
+/// Writes all data to the file descriptor, looping on partial writes.
+/// Handles WouldBlock by retrying with a short sleep.
+fn writeAllFd(fd: posix.fd_t, data: []const u8) !void {
+    var index: usize = 0;
+    while (index < data.len) {
+        const n = posix.write(fd, data[index..]) catch |err| {
+            if (err == error.WouldBlock) {
+                std.Thread.sleep(1 * std.time.ns_per_ms);
+                continue;
+            }
+            return err;
+        };
+        index += n;
+    }
+}
+
 const Pty = struct {
     id: usize,
     process: pty.Process,
@@ -1012,13 +1028,13 @@ const Client = struct {
                             pty_instance.terminal_mutex.unlock();
 
                             if (bracketed) {
-                                _ = posix.write(pty_instance.process.master, "\x1b[200~") catch |err| {
+                                writeAllFd(pty_instance.process.master, "\x1b[200~") catch |err| {
                                     log.err("Write to PTY failed: {}", .{err});
                                 };
-                                _ = posix.write(pty_instance.process.master, paste_data) catch |err| {
+                                writeAllFd(pty_instance.process.master, paste_data) catch |err| {
                                     log.err("Write to PTY failed: {}", .{err});
                                 };
-                                _ = posix.write(pty_instance.process.master, "\x1b[201~") catch |err| {
+                                writeAllFd(pty_instance.process.master, "\x1b[201~") catch |err| {
                                     log.err("Write to PTY failed: {}", .{err});
                                 };
                             } else {
@@ -1028,7 +1044,7 @@ const Client = struct {
                                 };
                                 defer self.server.allocator.free(mutable_data);
                                 std.mem.replaceScalar(u8, mutable_data, '\n', '\r');
-                                _ = posix.write(pty_instance.process.master, mutable_data) catch |err| {
+                                writeAllFd(pty_instance.process.master, mutable_data) catch |err| {
                                     log.err("Write to PTY failed: {}", .{err});
                                 };
                             }
