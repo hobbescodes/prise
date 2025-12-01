@@ -1,4 +1,4 @@
-//! Server that manages PTY sessions and client connections.
+//! Server that manages PTYs and client connections.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -894,7 +894,7 @@ const Client = struct {
     send_buffer: ?[]u8 = null,
     send_offset: usize = 0,
     send_queue: std.ArrayList([]u8),
-    attached_sessions: std.ArrayList(usize),
+    attached_ptys: std.ArrayList(usize),
     closing: bool = false,
     // Map style ID to its last known definition hash/attributes to detect changes
     // We store the Attributes struct directly.
@@ -1002,7 +1002,7 @@ const Client = struct {
         }
         self.send_queue.deinit(allocator);
         self.msg_buffer.deinit(allocator);
-        self.attached_sessions.deinit(allocator);
+        self.attached_ptys.deinit(allocator);
 
         // Remove from server's client list
         for (server.clients.items, 0..) |c, i| {
@@ -1523,9 +1523,9 @@ const Client = struct {
             for (self.server.clients.items) |c| {
                 if (c.fd == client_fd) {
                     pty_instance.removeClient(c);
-                    for (c.attached_sessions.items, 0..) |sid, i| {
-                        if (sid == pty_id) {
-                            _ = c.attached_sessions.swapRemove(i);
+                    for (c.attached_ptys.items, 0..) |pid, i| {
+                        if (pid == pty_id) {
+                            _ = c.attached_ptys.swapRemove(i);
                             break;
                         }
                     }
@@ -1842,7 +1842,7 @@ const Server = struct {
 
         if (parsed.attach) {
             try pty_instance.addClient(self.allocator, client);
-            try client.attached_sessions.append(self.allocator, pty_id);
+            try client.attached_ptys.append(self.allocator, pty_id);
 
             log.info("Sending initial redraw for PTY {}", .{pty_id});
             const msg = try buildRedrawMessageFromPty(self.allocator, pty_instance, .full);
@@ -1887,7 +1887,7 @@ const Server = struct {
         };
 
         try pty_instance.addClient(self.allocator, client);
-        try client.attached_sessions.append(self.allocator, pty_id);
+        try client.attached_ptys.append(self.allocator, pty_id);
         log.info("Client {} attached to PTY {}", .{ client.fd, pty_id });
 
         const msg = try buildRedrawMessageFromPty(self.allocator, pty_instance, .full);
@@ -2001,9 +2001,9 @@ const Server = struct {
         for (self.clients.items) |c| {
             if (c.fd == args.client_fd) {
                 pty_instance.removeClient(c);
-                for (c.attached_sessions.items, 0..) |sid, i| {
-                    if (sid == args.id) {
-                        _ = c.attached_sessions.swapRemove(i);
+                for (c.attached_ptys.items, 0..) |pid, i| {
+                    if (pid == args.id) {
+                        _ = c.attached_ptys.swapRemove(i);
                         break;
                     }
                 }
@@ -2053,9 +2053,9 @@ const Server = struct {
 
                 if (matching_client) |c| {
                     pty_instance.removeClient(c);
-                    for (c.attached_sessions.items, 0..) |sid, i| {
-                        if (sid == pty_id) {
-                            _ = c.attached_sessions.swapRemove(i);
+                    for (c.attached_ptys.items, 0..) |pid, i| {
+                        if (pid == pty_id) {
+                            _ = c.attached_ptys.swapRemove(i);
                             break;
                         }
                     }
@@ -2148,7 +2148,7 @@ const Server = struct {
         var to_remove = std.ArrayList(usize).empty;
         defer to_remove.deinit(self.allocator);
 
-        for (client.attached_sessions.items) |pty_id| {
+        for (client.attached_ptys.items) |pty_id| {
             if (self.ptys.get(pty_id)) |pty_instance| {
                 pty_instance.removeClient(client);
                 std.log.info("Auto-removed client {} from PTY {}", .{ client.fd, pty_id });
@@ -2211,7 +2211,7 @@ const Server = struct {
                     .server = self,
                     .msg_buffer = std.ArrayList(u8).empty,
                     .send_queue = std.ArrayList([]u8).empty,
-                    .attached_sessions = std.ArrayList(usize).empty,
+                    .attached_ptys = std.ArrayList(usize).empty,
                     // .style_cache = std.AutoHashMap(u16, redraw.UIEvent.Style.Attributes).init(self.allocator),
                 };
                 try self.clients.append(self.allocator, client);
@@ -2271,10 +2271,10 @@ const Server = struct {
                 }
             }
 
-            // Check if client is attached to this session
+            // Check if client is attached to this pty
             var attached = false;
-            for (client.attached_sessions.items) |sid| {
-                if (sid == pty_instance.id) {
+            for (client.attached_ptys.items) |pid| {
+                if (pid == pty_instance.id) {
                     attached = true;
                     break;
                 }
@@ -2346,8 +2346,8 @@ const Server = struct {
         // Send to each client attached to this pty (same pattern as sendRedraw)
         for (self.clients.items) |client| {
             var attached = false;
-            for (client.attached_sessions.items) |sid| {
-                if (sid == pty_instance.id) {
+            for (client.attached_ptys.items) |pid| {
+                if (pid == pty_instance.id) {
                     attached = true;
                     break;
                 }
@@ -2606,7 +2606,7 @@ pub fn startServer(allocator: std.mem.Allocator, socket_path: []const u8) !void 
         posix.close(signal_pipe_fds[1]);
         for (server.clients.items) |client| {
             posix.close(client.fd);
-            client.attached_sessions.deinit(allocator);
+            client.attached_ptys.deinit(allocator);
             // client.style_cache.deinit();
             allocator.destroy(client);
         }
@@ -3148,7 +3148,7 @@ test "server - pty exit notification" {
             if (client.send_buffer) |buf| allocator.free(buf);
             for (client.send_queue.items) |buf| allocator.free(buf);
             client.send_queue.deinit(allocator);
-            client.attached_sessions.deinit(allocator);
+            client.attached_ptys.deinit(allocator);
             allocator.destroy(client);
         }
         server.clients.deinit(allocator);
@@ -3163,7 +3163,7 @@ test "server - pty exit notification" {
         .server = &server,
         .msg_buffer = std.ArrayList(u8).empty,
         .send_queue = std.ArrayList([]u8).empty,
-        .attached_sessions = std.ArrayList(usize).empty,
+        .attached_ptys = std.ArrayList(usize).empty,
     };
     try server.clients.append(allocator, client);
 
