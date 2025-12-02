@@ -96,7 +96,7 @@ pub fn decodeMessage(allocator: Allocator, data: []const u8) DecodeError!Message
             errdefer allocator.free(method);
             const params = try decoder.decode();
 
-            return Message{
+            return .{
                 .request = .{
                     .msgid = msgid,
                     .method = method,
@@ -119,7 +119,7 @@ pub fn decodeMessage(allocator: Allocator, data: []const u8) DecodeError!Message
 
             const result = try decoder.decode();
 
-            return Message{
+            return .{
                 .response = .{
                     .msgid = msgid,
                     .err = err_val,
@@ -133,7 +133,7 @@ pub fn decodeMessage(allocator: Allocator, data: []const u8) DecodeError!Message
             errdefer allocator.free(method);
             const params = try decoder.decode();
 
-            return Message{
+            return .{
                 .notification = .{
                     .method = method,
                     .params = params,
@@ -156,7 +156,7 @@ pub fn decodeMessageWithSize(allocator: Allocator, data: []const u8) DecodeError
     const msg_type = try decoder.readInt();
     std.debug.assert(msg_type >= 0 and msg_type <= 2);
 
-    const message = switch (msg_type) {
+    const message: Message = switch (msg_type) {
         0 => blk: { // Request: [0, msgid, method, params]
             if (len != 4) return error.InvalidArrayLength;
             const msgid = @as(u32, @intCast(try decoder.readInt()));
@@ -164,7 +164,7 @@ pub fn decodeMessageWithSize(allocator: Allocator, data: []const u8) DecodeError
             errdefer allocator.free(method);
             const params = try decoder.decode();
 
-            break :blk Message{
+            break :blk .{
                 .request = .{
                     .msgid = msgid,
                     .method = method,
@@ -187,7 +187,7 @@ pub fn decodeMessageWithSize(allocator: Allocator, data: []const u8) DecodeError
 
             const result = try decoder.decode();
 
-            break :blk Message{
+            break :blk .{
                 .response = .{
                     .msgid = msgid,
                     .err = err_val,
@@ -201,7 +201,7 @@ pub fn decodeMessageWithSize(allocator: Allocator, data: []const u8) DecodeError
             errdefer allocator.free(method);
             const params = try decoder.decode();
 
-            break :blk Message{
+            break :blk .{
                 .notification = .{
                     .method = method,
                     .params = params,
@@ -211,7 +211,7 @@ pub fn decodeMessageWithSize(allocator: Allocator, data: []const u8) DecodeError
         else => return error.InvalidMessageType,
     };
 
-    return DecodeResult{
+    return .{
         .message = message,
         .bytes_consumed = decoder.pos,
     };

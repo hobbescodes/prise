@@ -166,21 +166,21 @@ pub const RedrawBuilder = struct {
     pub fn resize(self: *RedrawBuilder, pty: u32, rows: u16, cols: u16) !void {
         const arena = self.arena.allocator();
         // Event format: ["resize", [pty, rows, cols]]
-        const event_name = msgpack.Value{ .string = try arena.dupe(u8, "resize") };
+        const event_name: msgpack.Value = .{ .string = try arena.dupe(u8, "resize") };
 
         const args = try arena.alloc(msgpack.Value, 3);
-        args[0] = msgpack.Value{ .unsigned = pty };
-        args[1] = msgpack.Value{ .unsigned = rows };
-        args[2] = msgpack.Value{ .unsigned = cols };
+        args[0] = .{ .unsigned = pty };
+        args[1] = .{ .unsigned = rows };
+        args[2] = .{ .unsigned = cols };
 
-        const args_array = msgpack.Value{ .array = args };
+        const args_array: msgpack.Value = .{ .array = args };
 
         // Event is [event_name, args]
         const event_arr = try arena.alloc(msgpack.Value, 2);
         event_arr[0] = event_name;
         event_arr[1] = args_array;
 
-        try self.events.append(self.allocator, msgpack.Value{ .array = event_arr });
+        try self.events.append(self.allocator, .{ .array = event_arr });
     }
 
     /// Add a write event
@@ -193,7 +193,7 @@ pub const RedrawBuilder = struct {
     ) !void {
         const arena = self.arena.allocator();
         // Event format: ["write", [pty, row, col, cells]]
-        const event_name = msgpack.Value{ .string = try arena.dupe(u8, "write") };
+        const event_name: msgpack.Value = .{ .string = try arena.dupe(u8, "write") };
 
         // Build cells array
         const cells_arr = try arena.alloc(msgpack.Value, cells.len);
@@ -202,11 +202,11 @@ pub const RedrawBuilder = struct {
             defer cell_items.deinit(arena);
 
             // Always include grapheme
-            try cell_items.append(arena, msgpack.Value{ .string = try arena.dupe(u8, cell.grapheme) });
+            try cell_items.append(arena, .{ .string = try arena.dupe(u8, cell.grapheme) });
 
             // Include style_id if present
             if (cell.style_id) |sid| {
-                try cell_items.append(arena, msgpack.Value{ .unsigned = sid });
+                try cell_items.append(arena, .{ .unsigned = sid });
             }
 
             // Include repeat if present and style_id was included
@@ -215,7 +215,7 @@ pub const RedrawBuilder = struct {
                     // If no style_id, we need to include nil placeholder
                     try cell_items.insert(arena, 1, msgpack.Value.nil);
                 }
-                try cell_items.append(arena, msgpack.Value{ .unsigned = rep });
+                try cell_items.append(arena, .{ .unsigned = rep });
             }
 
             // Include width if present (for wide chars)
@@ -227,96 +227,96 @@ pub const RedrawBuilder = struct {
                 } else if (cell.repeat == null) {
                     try cell_items.append(arena, msgpack.Value.nil); // repeat placeholder
                 }
-                try cell_items.append(arena, msgpack.Value{ .unsigned = w });
+                try cell_items.append(arena, .{ .unsigned = w });
             }
 
-            cells_arr[i] = msgpack.Value{ .array = try cell_items.toOwnedSlice(arena) };
+            cells_arr[i] = .{ .array = try cell_items.toOwnedSlice(arena) };
         }
 
         const args = try arena.alloc(msgpack.Value, 4);
-        args[0] = msgpack.Value{ .unsigned = pty };
-        args[1] = msgpack.Value{ .unsigned = row };
-        args[2] = msgpack.Value{ .unsigned = col };
-        args[3] = msgpack.Value{ .array = cells_arr };
+        args[0] = .{ .unsigned = pty };
+        args[1] = .{ .unsigned = row };
+        args[2] = .{ .unsigned = col };
+        args[3] = .{ .array = cells_arr };
 
-        const args_array = msgpack.Value{ .array = args };
+        const args_array: msgpack.Value = .{ .array = args };
 
         const event_arr = try arena.alloc(msgpack.Value, 2);
         event_arr[0] = event_name;
         event_arr[1] = args_array;
 
-        try self.events.append(self.allocator, msgpack.Value{ .array = event_arr });
+        try self.events.append(self.allocator, .{ .array = event_arr });
     }
 
     /// Add a cursor_pos event
     pub fn cursorPos(self: *RedrawBuilder, pty: u32, row: u16, col: u16, visible: bool) !void {
         const arena = self.arena.allocator();
-        const event_name = msgpack.Value{ .string = try arena.dupe(u8, "cursor_pos") };
+        const event_name: msgpack.Value = .{ .string = try arena.dupe(u8, "cursor_pos") };
 
         const args = try arena.alloc(msgpack.Value, 4);
-        args[0] = msgpack.Value{ .unsigned = pty };
-        args[1] = msgpack.Value{ .unsigned = row };
-        args[2] = msgpack.Value{ .unsigned = col };
-        args[3] = msgpack.Value{ .boolean = visible };
+        args[0] = .{ .unsigned = pty };
+        args[1] = .{ .unsigned = row };
+        args[2] = .{ .unsigned = col };
+        args[3] = .{ .boolean = visible };
 
-        const args_array = msgpack.Value{ .array = args };
+        const args_array: msgpack.Value = .{ .array = args };
 
         const event_arr = try arena.alloc(msgpack.Value, 2);
         event_arr[0] = event_name;
         event_arr[1] = args_array;
 
-        try self.events.append(self.allocator, msgpack.Value{ .array = event_arr });
+        try self.events.append(self.allocator, .{ .array = event_arr });
     }
 
     /// Add a cursor_shape event
     pub fn cursorShape(self: *RedrawBuilder, pty: u32, shape: UIEvent.CursorShape.Shape) !void {
         const arena = self.arena.allocator();
-        const event_name = msgpack.Value{ .string = try arena.dupe(u8, "cursor_shape") };
+        const event_name: msgpack.Value = .{ .string = try arena.dupe(u8, "cursor_shape") };
 
         const args = try arena.alloc(msgpack.Value, 2);
-        args[0] = msgpack.Value{ .unsigned = pty };
-        args[1] = msgpack.Value{ .unsigned = @intFromEnum(shape) };
+        args[0] = .{ .unsigned = pty };
+        args[1] = .{ .unsigned = @intFromEnum(shape) };
 
-        const args_array = msgpack.Value{ .array = args };
+        const args_array: msgpack.Value = .{ .array = args };
 
         const event_arr = try arena.alloc(msgpack.Value, 2);
         event_arr[0] = event_name;
         event_arr[1] = args_array;
 
-        try self.events.append(self.allocator, msgpack.Value{ .array = event_arr });
+        try self.events.append(self.allocator, .{ .array = event_arr });
     }
 
     /// Add a mouse_shape event
     pub fn mouseShape(self: *RedrawBuilder, pty: u32, shape: UIEvent.MouseShape.Shape) !void {
         const arena = self.arena.allocator();
-        const event_name = msgpack.Value{ .string = try arena.dupe(u8, "mouse_shape") };
+        const event_name: msgpack.Value = .{ .string = try arena.dupe(u8, "mouse_shape") };
 
         const args = try arena.alloc(msgpack.Value, 2);
-        args[0] = msgpack.Value{ .unsigned = pty };
-        args[1] = msgpack.Value{ .unsigned = @intFromEnum(shape) };
+        args[0] = .{ .unsigned = pty };
+        args[1] = .{ .unsigned = @intFromEnum(shape) };
 
-        const args_array = msgpack.Value{ .array = args };
+        const args_array: msgpack.Value = .{ .array = args };
 
         const event_arr = try arena.alloc(msgpack.Value, 2);
         event_arr[0] = event_name;
         event_arr[1] = args_array;
 
-        try self.events.append(self.allocator, msgpack.Value{ .array = event_arr });
+        try self.events.append(self.allocator, .{ .array = event_arr });
     }
 
     /// Add a flush event
     pub fn flush(self: *RedrawBuilder) !void {
         const arena = self.arena.allocator();
-        const event_name = msgpack.Value{ .string = try arena.dupe(u8, "flush") };
+        const event_name: msgpack.Value = .{ .string = try arena.dupe(u8, "flush") };
 
         const args = try arena.alloc(msgpack.Value, 0);
-        const args_array = msgpack.Value{ .array = args };
+        const args_array: msgpack.Value = .{ .array = args };
 
         const event_arr = try arena.alloc(msgpack.Value, 2);
         event_arr[0] = event_name;
         event_arr[1] = args_array;
 
-        try self.events.append(self.allocator, msgpack.Value{ .array = event_arr });
+        try self.events.append(self.allocator, .{ .array = event_arr });
     }
 
     /// Add a selection event (null values mean no selection)
@@ -329,22 +329,22 @@ pub const RedrawBuilder = struct {
         end_col: ?u16,
     ) !void {
         const arena = self.arena.allocator();
-        const event_name = msgpack.Value{ .string = try arena.dupe(u8, "selection") };
+        const event_name: msgpack.Value = .{ .string = try arena.dupe(u8, "selection") };
 
         const args = try arena.alloc(msgpack.Value, 5);
-        args[0] = msgpack.Value{ .unsigned = pty };
-        args[1] = if (start_row) |r| msgpack.Value{ .unsigned = r } else msgpack.Value.nil;
-        args[2] = if (start_col) |c| msgpack.Value{ .unsigned = c } else msgpack.Value.nil;
-        args[3] = if (end_row) |r| msgpack.Value{ .unsigned = r } else msgpack.Value.nil;
-        args[4] = if (end_col) |c| msgpack.Value{ .unsigned = c } else msgpack.Value.nil;
+        args[0] = .{ .unsigned = pty };
+        args[1] = if (start_row) |r| .{ .unsigned = r } else msgpack.Value.nil;
+        args[2] = if (start_col) |c| .{ .unsigned = c } else msgpack.Value.nil;
+        args[3] = if (end_row) |r| .{ .unsigned = r } else msgpack.Value.nil;
+        args[4] = if (end_col) |c| .{ .unsigned = c } else msgpack.Value.nil;
 
-        const args_array = msgpack.Value{ .array = args };
+        const args_array: msgpack.Value = .{ .array = args };
 
         const event_arr = try arena.alloc(msgpack.Value, 2);
         event_arr[0] = event_name;
         event_arr[1] = args_array;
 
-        try self.events.append(self.allocator, msgpack.Value{ .array = event_arr });
+        try self.events.append(self.allocator, .{ .array = event_arr });
     }
 
     /// Add a style event
@@ -354,127 +354,127 @@ pub const RedrawBuilder = struct {
         attrs: UIEvent.Style.Attributes,
     ) !void {
         const arena = self.arena.allocator();
-        const event_name = msgpack.Value{ .string = try arena.dupe(u8, "style") };
+        const event_name: msgpack.Value = .{ .string = try arena.dupe(u8, "style") };
 
         var items = std.ArrayList(msgpack.Value.KeyValue).empty;
         defer items.deinit(arena);
 
         if (attrs.fg) |fg| {
             try items.append(arena, .{
-                .key = msgpack.Value{ .string = try arena.dupe(u8, "fg") },
-                .value = msgpack.Value{ .unsigned = fg },
+                .key = .{ .string = try arena.dupe(u8, "fg") },
+                .value = .{ .unsigned = fg },
             });
         } else if (attrs.fg_idx) |fg_idx| {
             try items.append(arena, .{
-                .key = msgpack.Value{ .string = try arena.dupe(u8, "fg_idx") },
-                .value = msgpack.Value{ .unsigned = fg_idx },
+                .key = .{ .string = try arena.dupe(u8, "fg_idx") },
+                .value = .{ .unsigned = fg_idx },
             });
         }
 
         if (attrs.bg) |bg| {
             try items.append(arena, .{
-                .key = msgpack.Value{ .string = try arena.dupe(u8, "bg") },
-                .value = msgpack.Value{ .unsigned = bg },
+                .key = .{ .string = try arena.dupe(u8, "bg") },
+                .value = .{ .unsigned = bg },
             });
         } else if (attrs.bg_idx) |bg_idx| {
             try items.append(arena, .{
-                .key = msgpack.Value{ .string = try arena.dupe(u8, "bg_idx") },
-                .value = msgpack.Value{ .unsigned = bg_idx },
+                .key = .{ .string = try arena.dupe(u8, "bg_idx") },
+                .value = .{ .unsigned = bg_idx },
             });
         }
 
         if (attrs.bold) {
             try items.append(arena, .{
-                .key = msgpack.Value{ .string = try arena.dupe(u8, "bold") },
-                .value = msgpack.Value{ .boolean = true },
+                .key = .{ .string = try arena.dupe(u8, "bold") },
+                .value = .{ .boolean = true },
             });
         }
 
         if (attrs.dim) {
             try items.append(arena, .{
-                .key = msgpack.Value{ .string = try arena.dupe(u8, "dim") },
-                .value = msgpack.Value{ .boolean = true },
+                .key = .{ .string = try arena.dupe(u8, "dim") },
+                .value = .{ .boolean = true },
             });
         }
 
         if (attrs.italic) {
             try items.append(arena, .{
-                .key = msgpack.Value{ .string = try arena.dupe(u8, "italic") },
-                .value = msgpack.Value{ .boolean = true },
+                .key = .{ .string = try arena.dupe(u8, "italic") },
+                .value = .{ .boolean = true },
             });
         }
 
         if (attrs.underline) {
             try items.append(arena, .{
-                .key = msgpack.Value{ .string = try arena.dupe(u8, "underline") },
-                .value = msgpack.Value{ .boolean = true },
+                .key = .{ .string = try arena.dupe(u8, "underline") },
+                .value = .{ .boolean = true },
             });
         }
 
         if (attrs.ul_style != .none) {
             try items.append(arena, .{
-                .key = msgpack.Value{ .string = try arena.dupe(u8, "ul_style") },
-                .value = msgpack.Value{ .unsigned = @intFromEnum(attrs.ul_style) },
+                .key = .{ .string = try arena.dupe(u8, "ul_style") },
+                .value = .{ .unsigned = @intFromEnum(attrs.ul_style) },
             });
         }
 
         if (attrs.ul_color) |ulc| {
             try items.append(arena, .{
-                .key = msgpack.Value{ .string = try arena.dupe(u8, "ul_color") },
-                .value = msgpack.Value{ .unsigned = ulc },
+                .key = .{ .string = try arena.dupe(u8, "ul_color") },
+                .value = .{ .unsigned = ulc },
             });
         }
 
         if (attrs.strikethrough) {
             try items.append(arena, .{
-                .key = msgpack.Value{ .string = try arena.dupe(u8, "strikethrough") },
-                .value = msgpack.Value{ .boolean = true },
+                .key = .{ .string = try arena.dupe(u8, "strikethrough") },
+                .value = .{ .boolean = true },
             });
         }
 
         if (attrs.reverse) {
             try items.append(arena, .{
-                .key = msgpack.Value{ .string = try arena.dupe(u8, "reverse") },
-                .value = msgpack.Value{ .boolean = true },
+                .key = .{ .string = try arena.dupe(u8, "reverse") },
+                .value = .{ .boolean = true },
             });
         }
 
         if (attrs.blink) {
             try items.append(arena, .{
-                .key = msgpack.Value{ .string = try arena.dupe(u8, "blink") },
-                .value = msgpack.Value{ .boolean = true },
+                .key = .{ .string = try arena.dupe(u8, "blink") },
+                .value = .{ .boolean = true },
             });
         }
 
         const args = try arena.alloc(msgpack.Value, 2);
-        args[0] = msgpack.Value{ .unsigned = id };
-        args[1] = msgpack.Value{ .map = try items.toOwnedSlice(arena) };
+        args[0] = .{ .unsigned = id };
+        args[1] = .{ .map = try items.toOwnedSlice(arena) };
 
-        const args_array = msgpack.Value{ .array = args };
+        const args_array: msgpack.Value = .{ .array = args };
 
         const event_arr = try arena.alloc(msgpack.Value, 2);
         event_arr[0] = event_name;
         event_arr[1] = args_array;
 
-        try self.events.append(self.allocator, msgpack.Value{ .array = event_arr });
+        try self.events.append(self.allocator, .{ .array = event_arr });
     }
 
     /// Add a title event
     pub fn title(self: *RedrawBuilder, pty: u32, title_text: []const u8) !void {
         const arena = self.arena.allocator();
-        const event_name = msgpack.Value{ .string = try arena.dupe(u8, "title") };
+        const event_name: msgpack.Value = .{ .string = try arena.dupe(u8, "title") };
 
         const args = try arena.alloc(msgpack.Value, 2);
-        args[0] = msgpack.Value{ .unsigned = pty };
-        args[1] = msgpack.Value{ .string = try arena.dupe(u8, title_text) };
+        args[0] = .{ .unsigned = pty };
+        args[1] = .{ .string = try arena.dupe(u8, title_text) };
 
-        const args_array = msgpack.Value{ .array = args };
+        const args_array: msgpack.Value = .{ .array = args };
 
         const event_arr = try arena.alloc(msgpack.Value, 2);
         event_arr[0] = event_name;
         event_arr[1] = args_array;
 
-        try self.events.append(self.allocator, msgpack.Value{ .array = event_arr });
+        try self.events.append(self.allocator, .{ .array = event_arr });
     }
 
     /// Build the final notification message: [2, "redraw", [events]]
@@ -482,11 +482,11 @@ pub const RedrawBuilder = struct {
         const arena = self.arena.allocator();
         // Build the notification array
         const notification = try arena.alloc(msgpack.Value, 3);
-        notification[0] = msgpack.Value{ .unsigned = 2 }; // type = notification
-        notification[1] = msgpack.Value{ .string = try arena.dupe(u8, "redraw") };
-        notification[2] = msgpack.Value{ .array = self.events.items };
+        notification[0] = .{ .unsigned = 2 }; // type = notification
+        notification[1] = .{ .string = try arena.dupe(u8, "redraw") };
+        notification[2] = .{ .array = self.events.items };
 
-        const value = msgpack.Value{ .array = notification };
+        const value: msgpack.Value = .{ .array = notification };
         // Don't call deinit - arena cleanup handles it
 
         return try msgpack.encodeFromValue(self.allocator, value);

@@ -136,16 +136,16 @@ pub const Widget = struct {
     }
 
     pub fn layout(self: *Widget, constraints: BoxConstraints) Size {
-        const size = switch (self.kind) {
-            .surface => Size{
+        const size: Size = switch (self.kind) {
+            .surface => .{
                 .width = constraints.max_width.?,
                 .height = constraints.max_height.?,
             },
-            .text_input => Size{
+            .text_input => .{
                 .width = constraints.max_width orelse 20,
                 .height = 1,
             },
-            .list => |l| Size{
+            .list => |l| .{
                 .width = constraints.max_width orelse 20,
                 .height = @min(@as(u16, @intCast(l.items.len)), constraints.max_height orelse @as(u16, @intCast(l.items.len))),
             },
@@ -1646,7 +1646,7 @@ fn layoutBoxImpl(b: *Box, constraints: BoxConstraints) Size {
     b.child.width = child_size.width;
     b.child.height = child_size.height;
 
-    return Size{
+    return .{
         .width = child_size.width + border_size,
         .height = child_size.height + border_size,
     };
@@ -1670,7 +1670,7 @@ fn layoutPaddingImpl(p: *Padding, constraints: BoxConstraints) Size {
     p.child.width = child_size.width;
     p.child.height = child_size.height;
 
-    return Size{
+    return .{
         .width = child_size.width + h_padding,
         .height = child_size.height + v_padding,
     };
@@ -1773,7 +1773,7 @@ fn layoutColumnImpl(col: *Column, constraints: BoxConstraints) Size {
         final_height += child.height;
     }
 
-    return Size{
+    return .{
         .width = width,
         .height = final_height,
     };
@@ -1875,7 +1875,7 @@ fn layoutRowImpl(row: *Row, constraints: BoxConstraints) Size {
         final_width += child.width;
     }
 
-    return Size{
+    return .{
         .width = final_width,
         .height = height,
     };
@@ -1908,7 +1908,7 @@ fn layoutTextImpl(text: *Text, constraints: BoxConstraints) Size {
         height += 1;
     }
 
-    return Size{
+    return .{
         .width = max_w,
         .height = height,
     };
@@ -1926,7 +1926,7 @@ fn layoutStackImpl(stack: *Stack, constraints: BoxConstraints) Size {
         if (child_size.height > max_height) max_height = child_size.height;
     }
 
-    return Size{
+    return .{
         .width = max_width,
         .height = max_height,
     };
@@ -1954,7 +1954,7 @@ fn layoutPositionedImpl(pos: *Positioned, constraints: BoxConstraints) Size {
     pos.child.width = child_size.width;
     pos.child.height = child_size.height;
 
-    return Size{
+    return .{
         .width = pos.child.x + child_size.width,
         .height = pos.child.y + child_size.height,
     };
