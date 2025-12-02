@@ -1887,11 +1887,12 @@ const Server = struct {
     signal_pipe_fds: [2]posix.fd_t,
     signal_buf: [1]u8 = undefined,
 
-    fn parseSpawnPtyParams(params: msgpack.Value) struct { size: pty.Winsize, attach: bool, cwd: ?[]const u8 } {
+    fn parseSpawnPtyParams(params: msgpack.Value) struct { size: pty.Winsize, attach: bool, cwd: ?[]const u8, env: ?[]const msgpack.Value } {
         var rows: u16 = 24;
         var cols: u16 = 80;
         var attach: bool = false;
         var cwd: ?[]const u8 = null;
+        var env: ?[]const msgpack.Value = null;
 
         if (params == .map) {
             for (params.map) |kv| {
@@ -1904,6 +1905,8 @@ const Server = struct {
                     attach = kv.value.boolean;
                 } else if (std.mem.eql(u8, kv.key.string, "cwd") and kv.value == .string) {
                     cwd = kv.value.string;
+                } else if (std.mem.eql(u8, kv.key.string, "env") and kv.value == .array) {
+                    env = kv.value.array;
                 }
             }
         }
@@ -1917,6 +1920,7 @@ const Server = struct {
             },
             .attach = attach,
             .cwd = cwd,
+            .env = env,
         };
     }
 
@@ -2010,19 +2014,39 @@ const Server = struct {
 
         const parsed = parseSpawnPtyParams(params);
         const cwd = parsed.cwd orelse posix.getenv("HOME");
-        log.info("spawn_pty: rows={} cols={} attach={} cwd={?s}", .{ parsed.size.ws_row, parsed.size.ws_col, parsed.attach, cwd });
+        log.info("spawn_pty: rows={} cols={} attach={} cwd={?s} has_client_env={}", .{ parsed.size.ws_row, parsed.size.ws_col, parsed.attach, cwd, parsed.env != null });
 
-        const shell = posix.getenv("SHELL") orelse "/bin/sh";
-
-        var env_map = try std.process.getEnvMap(self.allocator);
-        defer env_map.deinit();
-
-        var env_list = try prepareSpawnEnv(self.allocator, &env_map);
+        var shell: []const u8 = "/bin/sh";
+        var env_list = std.ArrayList([]const u8).empty;
         defer {
             for (env_list.items) |item| {
                 self.allocator.free(item);
             }
             env_list.deinit(self.allocator);
+        }
+
+        if (parsed.env) |client_env| {
+            for (client_env) |val| {
+                if (val == .string) {
+                    const env_str = try self.allocator.dupe(u8, val.string);
+                    try env_list.append(self.allocator, env_str);
+                    if (std.mem.startsWith(u8, val.string, "SHELL=")) {
+                        shell = env_str[6..];
+                    }
+                }
+            }
+            const term_str = try self.allocator.dupe(u8, "TERM=xterm-256color");
+            try env_list.append(self.allocator, term_str);
+            const colorterm_str = try self.allocator.dupe(u8, "COLORTERM=truecolor");
+            try env_list.append(self.allocator, colorterm_str);
+        } else {
+            var env_map = try std.process.getEnvMap(self.allocator);
+            defer env_map.deinit();
+            const prepared = try prepareSpawnEnv(self.allocator, &env_map);
+            env_list = prepared;
+            if (posix.getenv("SHELL")) |s| {
+                shell = s;
+            }
         }
 
         const process = try pty.Process.spawn(self.allocator, parsed.size, &.{shell}, @ptrCast(env_list.items), cwd);

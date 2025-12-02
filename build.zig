@@ -38,6 +38,43 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
+    const os = @import("builtin").os.tag;
+    if (os.isDarwin()) {
+        const plist = b.addWriteFiles();
+        const plist_content = std.fmt.allocPrint(b.allocator,
+            \\<?xml version="1.0" encoding="UTF-8"?>
+            \\<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+            \\<plist version="1.0">
+            \\<dict>
+            \\    <key>Label</key>
+            \\    <string>sh.prise.server</string>
+            \\    <key>ProgramArguments</key>
+            \\    <array>
+            \\        <string>{s}/bin/prise</string>
+            \\        <string>serve</string>
+            \\    </array>
+            \\    <key>RunAtLoad</key>
+            \\    <true/>
+            \\    <key>KeepAlive</key>
+            \\    <true/>
+            \\    <key>StandardOutPath</key>
+            \\    <string>/dev/null</string>
+            \\    <key>StandardErrorPath</key>
+            \\    <string>/dev/null</string>
+            \\</dict>
+            \\</plist>
+            \\
+        , .{b.install_prefix}) catch @panic("OOM");
+        _ = plist.add("sh.prise.server.plist", plist_content);
+        b.getInstallStep().dependOn(&b.addInstallDirectory(.{
+            .source_dir = plist.getDirectory(),
+            .install_dir = .{ .custom = "share/prise" },
+            .install_subdir = "",
+        }).step);
+    } else if (os == .linux) {
+        b.installFile("dist/prise.service", "lib/systemd/user/prise.service");
+    }
+
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
@@ -98,4 +135,42 @@ pub fn build(b: *std.Build) void {
         "command -v stylua > /dev/null || { echo '⚠ Warning: stylua not found. Run: brew install stylua'; }",
     });
     setup_step.dependOn(&check_stylua.step);
+
+    const enable_service_step = b.step("enable-service", "Enable and start the prise server service");
+    if (os.isDarwin()) {
+        const enable_macos = b.addSystemCommand(&.{
+            "sh",
+            "-c",
+            \\set -e
+            \\PLIST_SRC="$1/share/prise/sh.prise.server.plist"
+            \\PLIST_DST="$HOME/Library/LaunchAgents/sh.prise.server.plist"
+            \\mkdir -p "$HOME/Library/LaunchAgents"
+            \\ln -sf "$PLIST_SRC" "$PLIST_DST"
+            \\launchctl unload "$PLIST_DST" 2>/dev/null || true
+            \\launchctl load "$PLIST_DST"
+            \\echo "✓ prise server enabled and started"
+            ,
+            "--",
+        });
+        enable_macos.addDirectoryArg(.{ .cwd_relative = b.install_prefix });
+        enable_service_step.dependOn(&enable_macos.step);
+    } else if (os == .linux) {
+        const enable_linux = b.addSystemCommand(&.{
+            "sh",
+            "-c",
+            \\set -e
+            \\SERVICE_SRC="$1/lib/systemd/user/prise.service"
+            \\SERVICE_DST="$HOME/.config/systemd/user/prise.service"
+            \\mkdir -p "$HOME/.config/systemd/user"
+            \\ln -sf "$SERVICE_SRC" "$SERVICE_DST"
+            \\systemctl --user daemon-reload
+            \\systemctl --user enable --now prise.service
+            \\echo "✓ prise server enabled and started"
+            ,
+            "--",
+        });
+        enable_linux.addDirectoryArg(.{ .cwd_relative = b.install_prefix });
+        enable_service_step.dependOn(&enable_linux.step);
+    }
+    enable_service_step.dependOn(b.getInstallStep());
 }

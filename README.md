@@ -64,6 +64,39 @@ To format code:
 zig build fmt
 ```
 
+## Installation
+
+To install the binary and service files:
+
+```bash
+zig build install --prefix ~/.local
+```
+
+To enable and start the prise server as a background service:
+
+```bash
+zig build enable-service --prefix ~/.local
+```
+
+This will:
+- **macOS**: Symlink the launchd plist to `~/Library/LaunchAgents/` and load it
+- **Linux**: Symlink the systemd unit to `~/.config/systemd/user/` and enable it
+
+### Manual Service Management
+
+**macOS**:
+```bash
+launchctl unload ~/Library/LaunchAgents/sh.prise.server.plist  # stop
+launchctl load ~/Library/LaunchAgents/sh.prise.server.plist    # start
+```
+
+**Linux**:
+```bash
+systemctl --user stop prise     # stop
+systemctl --user start prise    # start
+systemctl --user status prise   # check status
+```
+
 ## Requirements
 
 The following binaries are required for development:

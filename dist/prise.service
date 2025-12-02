@@ -1,0 +1,12 @@
+[Unit]
+Description=Prise terminal multiplexer server
+Documentation=https://prise.sh
+
+[Service]
+Type=simple
+ExecStart=prise serve
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

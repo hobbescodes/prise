@@ -1730,15 +1730,27 @@ pub const App = struct {
                         app.state.next_msgid += 1;
                         try app.state.pending_requests.put(msgid, .spawn);
 
-                        const param_count: usize = if (app.initial_cwd != null) 4 else 3;
+                        var env_map = try std.process.getEnvMap(app.allocator);
+                        defer env_map.deinit();
+
+                        var env_array = std.ArrayList(msgpack.Value).empty;
+                        defer env_array.deinit(app.allocator);
+                        var env_it = env_map.iterator();
+                        while (env_it.next()) |entry| {
+                            const env_str = try std.fmt.allocPrint(app.allocator, "{s}={s}", .{ entry.key_ptr.*, entry.value_ptr.* });
+                            try env_array.append(app.allocator, .{ .string = env_str });
+                        }
+
+                        const param_count: usize = if (app.initial_cwd != null) 5 else 4;
                         var params_kv = try app.allocator.alloc(msgpack.Value.KeyValue, param_count);
                         defer app.allocator.free(params_kv);
-                        log.info("Sending spawn_pty: rows={} cols={} cwd={?s}", .{ ws.rows, ws.cols, app.initial_cwd });
+                        log.info("Sending spawn_pty: rows={} cols={} cwd={?s} env_count={}", .{ ws.rows, ws.cols, app.initial_cwd, env_array.items.len });
                         params_kv[0] = .{ .key = .{ .string = "rows" }, .value = .{ .unsigned = ws.rows } };
                         params_kv[1] = .{ .key = .{ .string = "cols" }, .value = .{ .unsigned = ws.cols } };
                         params_kv[2] = .{ .key = .{ .string = "attach" }, .value = .{ .boolean = true } };
+                        params_kv[3] = .{ .key = .{ .string = "env" }, .value = .{ .array = env_array.items } };
                         if (app.initial_cwd) |cwd| {
-                            params_kv[3] = .{ .key = .{ .string = "cwd" }, .value = .{ .string = cwd } };
+                            params_kv[4] = .{ .key = .{ .string = "cwd" }, .value = .{ .string = cwd } };
                         }
                         const params_val = msgpack.Value{ .map = params_kv };
                         var arr = try app.allocator.alloc(msgpack.Value, 4);
