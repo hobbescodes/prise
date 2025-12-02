@@ -777,6 +777,10 @@ pub const App = struct {
         self.ui.setQuitCallback(self, struct {
             fn quit(ctx: *anyopaque) void {
                 const app: *App = @ptrCast(@alignCast(ctx));
+                // Delete session file if no PTYs remain
+                if (app.surfaces.count() == 0) {
+                    app.deleteCurrentSession();
+                }
                 app.state.should_quit = true;
                 if (app.connected) {
                     posix.close(app.fd);
@@ -2329,6 +2333,10 @@ pub const App = struct {
                                     entry.value.deinit();
                                     app.allocator.destroy(entry.value);
                                 }
+                                // Delete session file when last PTY exits
+                                if (app.surfaces.count() == 0) {
+                                    app.deleteCurrentSession();
+                                }
                             },
                             .cwd_changed => |info| {
                                 log.debug("CWD changed for PTY {}: {s}", .{ info.pty_id, info.cwd });
@@ -2529,6 +2537,26 @@ pub const App = struct {
         };
 
         return error.SessionAlreadyExists;
+    }
+
+    pub fn deleteCurrentSession(self: *App) void {
+        const name = self.current_session_name orelse return;
+
+        const home = std.posix.getenv("HOME") orelse return;
+        const state_dir = std.fs.path.join(self.allocator, &.{ home, ".local", "state", "prise", "sessions" }) catch return;
+        defer self.allocator.free(state_dir);
+
+        const filename = std.fmt.allocPrint(self.allocator, "{s}.json", .{name}) catch return;
+        defer self.allocator.free(filename);
+
+        var dir = std.fs.openDirAbsolute(state_dir, .{}) catch return;
+        defer dir.close();
+
+        dir.deleteFile(filename) catch |err| {
+            log.warn("Failed to delete session file {s}: {}", .{ filename, err });
+            return;
+        };
+        log.info("Deleted session file: {s}", .{filename});
     }
 
     const AUTOSAVE_DELAY_MS = 1000;
