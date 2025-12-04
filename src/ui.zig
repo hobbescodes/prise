@@ -246,14 +246,20 @@ pub const UI = struct {
         defer dir.close();
 
         var used = std.StringHashMap(void).init(self.allocator);
-        defer used.deinit();
+        defer {
+            var key_iter = used.keyIterator();
+            while (key_iter.next()) |key| {
+                self.allocator.free(key.*);
+            }
+            used.deinit();
+        }
 
         var iter = dir.iterate();
         while (try iter.next()) |entry| {
             if (entry.kind != .file) continue;
             const name = entry.name;
             if (!std.mem.endsWith(u8, name, ".json")) continue;
-            const base = name[0 .. name.len - 5];
+            const base = try self.allocator.dupe(u8, name[0 .. name.len - 5]);
             try used.put(base, {});
         }
 
