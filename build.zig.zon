@@ -5,15 +5,15 @@
     .minimum_zig_version = "0.15.2",
     .dependencies = .{
         .ghostty = .{
-            .url = "git+https://github.com/rockorager/ghostty#7fe3f5cd3f39f0566ff5ff9babca35e3b91a6675",
-            .hash = "ghostty-1.3.0-dev-5UdBC80yPgT1y6LHOR2X59UzN0axMOBDBZT3EJcBAkO-",
+            .url = "https://github.com/ghostty-org/ghostty/archive/1207240cf170e4a5d77d38730bbe537ade46868b.tar.gz",
+            .hash = "ghostty-1.3.0-dev-5UdBC07cPgQvfx4BGxQK26ra7EpUzQTlUmOTxkrCJqnB",
         },
         .vaxis = .{
-            .url = "git+https://github.com/rockorager/libvaxis#68d6ea1d94fa0e5575e3af505bebab29a15acb96",
+            .url = "https://github.com/rockorager/libvaxis/archive/68d6ea1d94fa0e5575e3af505bebab29a15acb96.tar.gz",
             .hash = "vaxis-0.5.1-BWNV_AAyCQAyuU8AUmRpkPzTW51DmXQ2nG6I-EyrROg_",
         },
         .zlua = .{
-            .url = "git+https://github.com/natecraddock/ziglua#af970851f5412a32c9eceb1c4519679a242c6093",
+            .url = "https://github.com/natecraddock/ziglua/archive/af970851f5412a32c9eceb1c4519679a242c6093.tar.gz",
             .hash = "zlua-0.1.0-hGRpCx89BQCdTNT2LiQGKujXawO2jCgB4hGl0WEqj0cz",
         },
     },
