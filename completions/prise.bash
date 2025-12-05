@@ -9,12 +9,13 @@ _prise_pty_ids() {
 }
 
 _prise() {
-    local cur prev words cword
-    _init_completion || return
+    local cur prev
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    case "${words[1]}" in
+    case "${COMP_WORDS[1]}" in
         session)
-            case "${words[2]}" in
+            case "${COMP_WORDS[2]}" in
                 attach|delete)
                     COMPREPLY=($(compgen -W "$(_prise_sessions)" -- "$cur"))
                     return
@@ -33,7 +34,7 @@ _prise() {
             esac
             ;;
         pty)
-            case "${words[2]}" in
+            case "${COMP_WORDS[2]}" in
                 kill)
                     COMPREPLY=($(compgen -W "$(_prise_pty_ids)" -- "$cur"))
                     return
