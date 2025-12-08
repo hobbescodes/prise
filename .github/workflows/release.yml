@@ -27,11 +27,18 @@ jobs:
         with:
           version: 0.15.2
 
-      - name: Build
-        run: zig build -Doptimize=ReleaseFast ${{ matrix.target && format('-Dtarget={0}', matrix.target) || '' }}
+      - name: Install StyLua
+        uses: JohnnyMorganz/stylua-action@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          version: latest
+          args: --version
 
       - name: Test
         run: zig build test
+
+      - name: Build
+        run: zig build -Doptimize=ReleaseFast ${{ matrix.target && format('-Dtarget={0}', matrix.target) || '' }}
 
       - name: Package
         run: |
