@@ -84,6 +84,7 @@ pub const Widget = struct {
     ratio: ?f32 = null,
     id: ?u32 = null,
     focus: bool = false,
+    dim_factor: f32 = 0.0,
     kind: WidgetKind,
 
     pub fn deinit(self: *Widget, allocator: std.mem.Allocator) void {
@@ -698,7 +699,18 @@ pub fn parseWidget(lua: *ziglua.Lua, allocator: std.mem.Allocator, index: i32) !
         };
         lua.pop(1);
 
-        return .{ .ratio = ratio, .id = id, .focus = focus, .kind = .{ .surface = .{ .pty_id = @intCast(pty_id) } } };
+        // Parse dim factor for inactive pane dimming
+        var dim_factor: f32 = 0.0;
+        _ = lua.getField(index, "dim");
+        if (lua.typeOf(-1) == .number) {
+            dim_factor = @floatCast(lua.toNumber(-1) catch 0.0);
+            // Clamp to valid range
+            if (dim_factor < 0.0) dim_factor = 0.0;
+            if (dim_factor > 1.0) dim_factor = 1.0;
+        }
+        lua.pop(1);
+
+        return .{ .ratio = ratio, .id = id, .focus = focus, .dim_factor = dim_factor, .kind = .{ .surface = .{ .pty_id = @intCast(pty_id) } } };
     } else if (std.mem.eql(u8, widget_type, "text_input")) {
         _ = lua.getField(index, "input");
 

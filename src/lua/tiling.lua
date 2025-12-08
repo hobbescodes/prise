@@ -101,9 +101,13 @@ local POWERLINE_SYMBOLS = {
 ---@field focused_color? string Hex color for focused pane border (default: "#89b4fa")
 ---@field unfocused_color? string Hex color for unfocused borders (default: "#585b70")
 
+---@class PrisePanesConfig
+---@field borders? PriseBordersConfig Pane border options
+---@field inactive_dim? number Dim intensity for inactive panes 0.0-1.0 (default: 1.0)
+
 ---@class PriseConfig
 ---@field theme? PriseTheme Color theme options
----@field borders? PriseBordersConfig Pane border options
+---@field panes? PrisePanesConfig Pane appearance options
 ---@field status_bar? PriseStatusBarConfig Status bar options
 ---@field tab_bar? PriseTabBarConfig Tab bar options
 ---@field keybinds? PriseKeybinds Keybind configuration
@@ -130,11 +134,14 @@ local config = {
         green = "#a6e3a1", -- Success/connected
         yellow = "#f9e2af", -- Warning
     },
-    borders = {
-        enabled = false,
-        style = "single",
-        focused_color = "#89b4fa", -- Blue (matches default theme.accent)
-        unfocused_color = "#585b70", -- Gray (matches default theme.bg4)
+    panes = {
+        inactive_dim = 1.0, -- Dim intensity for inactive panes (0.0 = disabled, 1.0 = max)
+        borders = {
+            enabled = false,
+            style = "single",
+            focused_color = "#89b4fa", -- Blue (matches default theme.accent)
+            unfocused_color = "#585b70", -- Gray (matches default theme.bg4)
+        },
     },
     status_bar = {
         enabled = true,
@@ -1888,18 +1895,22 @@ local function render_node(node, force_unfocused)
         prise.log.debug(
             "render_node: force_unfocused=" .. tostring(force_unfocused) .. " is_focused=" .. tostring(is_focused)
         )
+        -- Calculate actual dim factor: 0.0 (disabled) to 0.05 (max)
+        local dim_factor = is_focused and 0.0 or (config.panes.inactive_dim * 0.05)
         local terminal = prise.Terminal({
             pty = node.pty,
             ratio = node.ratio,
             focus = is_focused,
+            dim = dim_factor,
         })
 
         -- Wrap in Box if borders are enabled
-        if config.borders.enabled then
-            local border_color = is_focused and config.borders.focused_color or config.borders.unfocused_color
+        if config.panes.borders.enabled then
+            local border_color = is_focused and config.panes.borders.focused_color
+                or config.panes.borders.unfocused_color
 
             return prise.Box({
-                border = config.borders.style,
+                border = config.panes.borders.style,
                 style = { fg = border_color },
                 child = terminal,
                 ratio = node.ratio, -- Propagate ratio for layout system
@@ -2233,13 +2244,14 @@ function M.view()
             local terminal = prise.Terminal({
                 pty = pane.pty,
                 focus = not overlay_visible,
+                dim = 0.0, -- Zoomed pane is always focused, no dimming
             })
 
             -- Apply borders to zoomed pane if enabled
-            if config.borders.enabled then
+            if config.panes.borders.enabled then
                 content = prise.Box({
-                    border = config.borders.style,
-                    style = { fg = config.borders.focused_color }, -- Zoomed pane is always focused
+                    border = config.panes.borders.style,
+                    style = { fg = config.panes.borders.focused_color }, -- Zoomed pane is always focused
                     child = terminal,
                 })
             else

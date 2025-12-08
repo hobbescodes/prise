@@ -1535,9 +1535,7 @@ pub const App = struct {
                             log.err("Failed to send resize: {}", .{err});
                         };
                     }
-                    // Calculate dim factor based on focus
-                    const dim_factor: f32 = if (w.focus) 0.0 else 0.05; // Dim inactive windows by 5%
-                    surface.render(win, w.focus, &self.colors, dim_factor);
+                    surface.render(win, w.focus, &self.colors, w.dim_factor);
                 }
             },
             .text => |text| {

@@ -4,6 +4,7 @@
 ---@field id? string
 ---@field focus? boolean
 ---@field show_cursor? boolean
+---@field dim? number Dim factor for inactive panes (0.0-1.0)
 
 ---@class TextSegment
 ---@field text string
@@ -88,6 +89,7 @@ function M.Terminal(opts)
         id = opts.id,
         focus = opts.focus,
         show_cursor = opts.show_cursor,
+        dim = opts.dim,
     }
 end
 
