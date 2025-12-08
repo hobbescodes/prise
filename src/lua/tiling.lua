@@ -98,8 +98,8 @@ local POWERLINE_SYMBOLS = {
 ---@class PriseBordersConfig
 ---@field enabled? boolean Show pane borders (default: false)
 ---@field style? "none"|"single"|"double"|"rounded" Border style (default: "single")
----@field focused_color? string Hex color for focused pane border (default: "#89b4fa")
----@field unfocused_color? string Hex color for unfocused borders (default: "#585b70")
+---@field active_color? string Hex color for active pane border (default: "#89b4fa")
+---@field inactive_color? string Hex color for inactive borders (default: "#585b70")
 
 ---@class PrisePanesConfig
 ---@field borders? PriseBordersConfig Pane border options
@@ -139,8 +139,8 @@ local config = {
         borders = {
             enabled = false,
             style = "single",
-            focused_color = "#89b4fa", -- Blue (matches default theme.accent)
-            unfocused_color = "#585b70", -- Gray (matches default theme.bg4)
+            active_color = "#89b4fa", -- Blue (matches default theme.accent)
+            inactive_color = "#585b70", -- Gray (matches default theme.bg4)
         },
     },
     status_bar = {
@@ -1906,8 +1906,7 @@ local function render_node(node, force_unfocused)
 
         -- Wrap in Box if borders are enabled
         if config.panes.borders.enabled then
-            local border_color = is_focused and config.panes.borders.focused_color
-                or config.panes.borders.unfocused_color
+            local border_color = is_focused and config.panes.borders.active_color or config.panes.borders.inactive_color
 
             return prise.Box({
                 border = config.panes.borders.style,
@@ -2251,7 +2250,7 @@ function M.view()
             if config.panes.borders.enabled then
                 content = prise.Box({
                     border = config.panes.borders.style,
-                    style = { fg = config.panes.borders.focused_color }, -- Zoomed pane is always focused
+                    style = { fg = config.panes.borders.active_color }, -- Zoomed pane is always active
                     child = terminal,
                 })
             else
