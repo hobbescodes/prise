@@ -604,6 +604,7 @@ pub const App = struct {
     first_resize_done: bool = false,
     socket_path: []const u8 = undefined,
     attach_session: ?[]const u8 = null,
+    new_session_name: ?[]const u8 = null,
     initial_cwd: ?[]const u8 = null,
     last_render_time: i64 = 0,
     render_timer: ?io.Task = null,
@@ -1869,6 +1870,11 @@ pub const App = struct {
             log.info("Setting current_session_name to: {s}", .{session_name});
             self.current_session_name = try self.allocator.dupe(u8, session_name);
             try self.startSessionAttach(session_name);
+        } else if (self.new_session_name) |name| {
+            // User specified a name for new session
+            self.current_session_name = try self.allocator.dupe(u8, name);
+            log.info("Starting new session with user-specified name: {s}", .{name});
+            try self.spawnInitialPty();
         } else {
             // Generate a new session name for fresh launch
             self.current_session_name = try self.ui.getNextSessionName();
