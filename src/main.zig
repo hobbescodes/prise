@@ -108,6 +108,7 @@ fn parseArgs(allocator: std.mem.Allocator, socket_path: []const u8) !?ParseResul
     _ = args.skip();
 
     var result: ParseResult = .{};
+    errdefer if (result.new_session_name) |s| allocator.free(s);
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-v")) {
@@ -126,9 +127,9 @@ fn parseArgs(allocator: std.mem.Allocator, socket_path: []const u8) !?ParseResul
                 return err;
             };
             if (sessionExists(allocator, name)) {
-                printSessionNameError("error: session '");
-                printSessionNameError(name);
-                printSessionNameError("' already exists\n");
+                var err_buf: [128]u8 = undefined;
+                const msg = std.fmt.bufPrint(&err_buf, "error: session '{s}' already exists\n", .{name}) catch return error.SessionAlreadyExists;
+                printSessionNameError(msg);
                 return error.SessionAlreadyExists;
             }
             result.new_session_name = try allocator.dupe(u8, name);
@@ -137,6 +138,10 @@ fn parseArgs(allocator: std.mem.Allocator, socket_path: []const u8) !?ParseResul
             try server.startServer(allocator, socket_path);
             return null;
         } else if (std.mem.eql(u8, arg, "session")) {
+            if (result.new_session_name != null) {
+                printSessionNameError("error: -s/--session cannot be used with 'session attach'\n");
+                return error.ConflictingOptions;
+            }
             const session_result = try handleSessionCommand(allocator, &args) orelse return null;
             result.attach_session = session_result.attach_session;
             return result;

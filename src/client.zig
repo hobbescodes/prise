@@ -603,7 +603,9 @@ pub const App = struct {
     ui: UI = undefined,
     first_resize_done: bool = false,
     socket_path: []const u8 = undefined,
+    /// Session name to attach to (existing session passed via `prise session attach <name>`)
     attach_session: ?[]const u8 = null,
+    /// User-specified session name for new session (passed via `prise -s <name>`)
     new_session_name: ?[]const u8 = null,
     initial_cwd: ?[]const u8 = null,
     last_render_time: i64 = 0,
