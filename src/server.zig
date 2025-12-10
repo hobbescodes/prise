@@ -2061,16 +2061,6 @@ const Server = struct {
         };
     }
 
-    fn parseDetachPtyParams(params: msgpack.Value) !struct { id: usize, client_fd: posix.fd_t } {
-        if (params != .array or params.array.len < 2 or params.array[0] != .unsigned or params.array[1] != .unsigned) {
-            return error.InvalidParams;
-        }
-        return .{
-            .id = @intCast(params.array[0].unsigned),
-            .client_fd = @intCast(params.array[1].unsigned),
-        };
-    }
-
     fn handleSpawnPty(self: *Server, client: *Client, params: msgpack.Value) !msgpack.Value {
         if (self.ptys.count() >= LIMITS.PTYS_MAX) {
             log.warn("PTY limit reached ({})", .{LIMITS.PTYS_MAX});
@@ -2282,57 +2272,42 @@ const Server = struct {
         return msgpack.Value.nil;
     }
 
-    fn handleDetachPty(self: *Server, params: msgpack.Value) !msgpack.Value {
-        const args = parseDetachPtyParams(params) catch {
-            return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") };
+    fn handleDetachPty(self: *Server, client: *Client, params: msgpack.Value) !msgpack.Value {
+        const pty_id: usize = switch (params) {
+            .unsigned => |u| u,
+            .integer => |i| @intCast(i),
+            .array => |arr| blk: {
+                if (arr.len < 1) return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") };
+                break :blk switch (arr[0]) {
+                    .unsigned => |u| u,
+                    .integer => |i| @intCast(i),
+                    else => return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") },
+                };
+            },
+            else => return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") },
         };
 
-        const pty_instance = self.ptys.get(args.id) orelse {
+        const pty_instance = self.ptys.get(pty_id) orelse {
             return msgpack.Value{ .string = try self.allocator.dupe(u8, "PTY not found") };
         };
 
-        for (self.clients.items) |c| {
-            if (c.fd == args.client_fd) {
-                pty_instance.removeClient(c);
-                for (c.attached_ptys.items, 0..) |pid, i| {
-                    if (pid == args.id) {
-                        _ = c.attached_ptys.swapRemove(i);
-                        break;
-                    }
-                }
-                log.info("Client {} detached from PTY {}", .{ c.fd, args.id });
+        pty_instance.removeClient(client);
+        for (client.attached_ptys.items, 0..) |pid, i| {
+            if (pid == pty_id) {
+                _ = client.attached_ptys.swapRemove(i);
                 break;
             }
         }
+        log.info("Client {} detached from PTY {}", .{ client.fd, pty_id });
 
         return msgpack.Value.nil;
     }
 
-    fn handleDetachPtys(self: *Server, params: msgpack.Value) !msgpack.Value {
-        const params_arr = switch (params) {
+    fn handleDetachPtys(self: *Server, client: *Client, params: msgpack.Value) !msgpack.Value {
+        const pty_ids = switch (params) {
             .array => |arr| arr,
             else => return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") },
         };
-        if (params_arr.len < 2) {
-            return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") };
-        }
-        const pty_ids = switch (params_arr[0]) {
-            .array => |arr| arr,
-            else => return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") },
-        };
-        const client_fd: posix.fd_t = switch (params_arr[1]) {
-            .unsigned => |u| @intCast(u),
-            .integer => |i| @intCast(i),
-            else => return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") },
-        };
-
-        var matching_client: ?*Client = null;
-        for (self.clients.items) |c| {
-            if (c.fd == client_fd) {
-                matching_client = c;
-                break;
-            }
-        }
 
         for (pty_ids) |pty_id_val| {
             const pty_id: usize = switch (pty_id_val) {
@@ -2342,16 +2317,14 @@ const Server = struct {
             };
 
             if (self.ptys.get(pty_id)) |pty_instance| {
-                if (matching_client) |c| {
-                    pty_instance.removeClient(c);
-                    for (c.attached_ptys.items, 0..) |pid, i| {
-                        if (pid == pty_id) {
-                            _ = c.attached_ptys.swapRemove(i);
-                            break;
-                        }
+                pty_instance.removeClient(client);
+                for (client.attached_ptys.items, 0..) |pid, i| {
+                    if (pid == pty_id) {
+                        _ = client.attached_ptys.swapRemove(i);
+                        break;
                     }
                 }
-                std.log.info("Client detached from PTY {}", .{pty_id});
+                std.log.info("Client {} detached from PTY {}", .{ client.fd, pty_id });
             }
         }
 
@@ -2480,9 +2453,9 @@ const Server = struct {
         } else if (std.mem.eql(u8, method, "resize_pty")) {
             return self.handleResizePty(params);
         } else if (std.mem.eql(u8, method, "detach_pty")) {
-            return self.handleDetachPty(params);
+            return self.handleDetachPty(client, params);
         } else if (std.mem.eql(u8, method, "detach_ptys")) {
-            return self.handleDetachPtys(params);
+            return self.handleDetachPtys(client, params);
         } else if (std.mem.eql(u8, method, "get_selection")) {
             return self.handleGetSelection(params);
         } else if (std.mem.eql(u8, method, "clear_selection")) {
@@ -3420,18 +3393,6 @@ test "parseResizePtyParams" {
     try testing.expectEqual(@as(u16, 80), p_args.cols);
     try testing.expectEqual(@as(u16, 800), p_args.x_pixel);
     try testing.expectEqual(@as(u16, 600), p_args.y_pixel);
-}
-
-test "parseDetachPtyParams" {
-    const testing = std.testing;
-
-    var valid_args = [_]msgpack.Value{
-        .{ .unsigned = 42 },
-        .{ .unsigned = 10 },
-    };
-    const args = try Server.parseDetachPtyParams(.{ .array = &valid_args });
-    try testing.expectEqual(@as(usize, 42), args.id);
-    try testing.expectEqual(@as(posix.fd_t, 10), args.client_fd);
 }
 
 test "buildRedrawMessageFromPty" {

@@ -900,24 +900,18 @@ pub const App = struct {
                 const msgid = app_ptr.state.next_msgid;
                 app_ptr.state.next_msgid +%= 1;
 
-                var params = try app_ptr.allocator.alloc(msgpack.Value, 2);
-                params[0] = .{ .array = pty_ids };
-                params[1] = .{ .unsigned = @intCast(app_ptr.fd) };
-
                 var arr = try app_ptr.allocator.alloc(msgpack.Value, 4);
                 arr[0] = .{ .unsigned = 0 }; // request
                 arr[1] = .{ .unsigned = msgid };
                 arr[2] = .{ .string = "detach_ptys" };
-                arr[3] = .{ .array = params };
+                arr[3] = .{ .array = pty_ids };
 
                 const encoded = msgpack.encodeFromValue(app_ptr.allocator, msgpack.Value{ .array = arr }) catch {
                     app_ptr.allocator.free(arr);
-                    app_ptr.allocator.free(params);
                     return;
                 };
                 defer app_ptr.allocator.free(encoded);
                 app_ptr.allocator.free(arr);
-                app_ptr.allocator.free(params);
 
                 // Track that we're waiting for detach response
                 try app_ptr.state.pending_requests.put(msgid, .detach);
