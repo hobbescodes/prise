@@ -3,6 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const lua_check = b.option(bool, "lua-check", "Run lua-language-server typecheck") orelse true;
 
     const version = getVersion(b);
 
@@ -147,14 +148,16 @@ pub fn build(b: *std.Build) void {
     const stylua = b.addSystemCommand(&.{ "stylua", "src/lua" });
     fmt_step.dependOn(&stylua.step);
 
-    const lua_typecheck = b.addSystemCommand(&.{
-        "sh", "-c",
-        \\output=$(lua-language-server --check src/lua --configpath src/lua/.luarc.json 2>&1)
-        \\status=$?
-        \\if [ $status -ne 0 ]; then echo "$output"; exit $status; fi
-        ,
-    });
-    b.getInstallStep().dependOn(&lua_typecheck.step);
+    if (lua_check) {
+        const lua_typecheck = b.addSystemCommand(&.{
+            "sh", "-c",
+            \\output=$(lua-language-server --check src/lua --configpath src/lua/.luarc.json 2>&1)
+            \\status=$?
+            \\if [ $status -ne 0 ]; then echo "$output"; exit $status; fi
+            ,
+        });
+        b.getInstallStep().dependOn(&lua_typecheck.step);
+    }
 
     // mdman - markdown to man page converter
     const mdman_mod = b.createModule(.{
