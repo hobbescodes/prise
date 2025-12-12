@@ -8,9 +8,7 @@ Look at the current version in `build.zig.zon` and ask the user what the new ver
 
 ## 2. Update the version
 
-Edit both files to update the version:
-1. `build.zig.zon` - update the `.version` field
-2. `build.zig` - update the `version_base` constant
+Edit `build.zig.zon` to update the `.version` field to the new version.
 
 ## 3. Generate release subtitle
 
@@ -46,7 +44,7 @@ Run these commands and fix any issues:
 ## 6. Commit and tag
 
 After verification passes:
-1. Stage all changes: `git add build.zig build.zig.zon docs/releases/`
+1. Stage all changes: `git add build.zig.zon docs/releases/`
 2. Commit the version bump and release notes: `git commit -m "release: vX.Y.Z"`
 3. Create the tag: `git tag vX.Y.Z`
 
