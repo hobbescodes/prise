@@ -264,7 +264,10 @@ fn handleSessionCommand(allocator: std.mem.Allocator, args: *std.process.ArgIter
         try printSessionHelp();
         return null;
     } else if (std.mem.eql(u8, subcmd, "attach")) {
-        const session = args.next() orelse try findMostRecentSession(allocator);
+        const session = if (args.next()) |s|
+            try allocator.dupe(u8, s)
+        else
+            try findMostRecentSession(allocator);
         return .{ .attach_session = session };
     } else if (std.mem.eql(u8, subcmd, "list")) {
         try listSessions(allocator);
