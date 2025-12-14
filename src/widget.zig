@@ -2902,3 +2902,48 @@ test "render Text - span with leading space consumed by word wrap" {
     ;
     try tui_test.expectAsciiEqual(expected, ascii);
 }
+
+test "layout Text - multi-line height calculation with word wrap" {
+    var spans = [_]Text.Span{
+        .{ .text = "Hello world this wraps", .style = .{} },
+    };
+
+    var w: Widget = .{
+        .kind = .{ .text = .{ .spans = &spans, .wrap = .word } },
+    };
+
+    const size = w.layout(boundsConstraints(10, 10));
+
+    try std.testing.expectEqual(@as(u16, 3), size.height);
+    try std.testing.expect(size.width <= 10);
+}
+
+test "layout Text - multi-line height with char wrap" {
+    var spans = [_]Text.Span{
+        .{ .text = "ABCDEFGHIJKLMNO", .style = .{} },
+    };
+
+    var w: Widget = .{
+        .kind = .{ .text = .{ .spans = &spans, .wrap = .char } },
+    };
+
+    const size = w.layout(boundsConstraints(5, 10));
+
+    try std.testing.expectEqual(@as(u16, 3), size.height);
+    try std.testing.expectEqual(@as(u16, 5), size.width);
+}
+
+test "layout Text - no wrap reports full width single line" {
+    var spans = [_]Text.Span{
+        .{ .text = "A long line of text", .style = .{} },
+    };
+
+    var w: Widget = .{
+        .kind = .{ .text = .{ .spans = &spans, .wrap = .none } },
+    };
+
+    const size = w.layout(boundsConstraints(10, 5));
+
+    try std.testing.expectEqual(@as(u16, 1), size.height);
+    try std.testing.expectEqual(@as(u16, 19), size.width);
+}
