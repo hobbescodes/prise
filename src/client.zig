@@ -1549,6 +1549,22 @@ pub const App = struct {
         }
         self.split_handles = w.collectSplitHandles(self.allocator, 0, 0) catch &.{};
 
+        // Check for surface resize mismatches and send resize events
+        const resizes = w.collectSurfaceResizes(self.allocator) catch &.{};
+        defer if (resizes.len > 0) self.allocator.free(resizes);
+        for (resizes) |resize| {
+            log.info("Surface resize needed: pty={} {}x{} -> {}x{}", .{
+                resize.pty_id,
+                resize.surface.cols,
+                resize.surface.rows,
+                resize.width,
+                resize.height,
+            });
+            self.sendResize(resize.pty_id, resize.height, resize.width) catch |err| {
+                log.err("Failed to send resize: {}", .{err});
+            };
+        }
+
         try self.renderWidget(w, win);
 
         log.debug("render: calling vx.render()", .{});

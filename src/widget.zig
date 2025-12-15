@@ -39,6 +39,13 @@ pub const HitRegion = struct {
     }
 };
 
+pub const SurfaceResize = struct {
+    pty_id: u32,
+    surface: *Surface,
+    width: u16,
+    height: u16,
+};
+
 pub const SplitHandle = struct {
     parent_id: ?u32,
     child_index: u16,
@@ -498,6 +505,58 @@ pub const Widget = struct {
             },
             .padding => |p| {
                 try p.child.collectSplitHandlesRecursive(allocator, handles, abs_x, abs_y);
+            },
+        }
+    }
+
+    pub fn collectSurfaceResizes(self: *const Widget, allocator: std.mem.Allocator) ![]SurfaceResize {
+        var resizes = std.ArrayList(SurfaceResize).empty;
+        errdefer resizes.deinit(allocator);
+
+        try self.collectSurfaceResizesRecursive(allocator, &resizes);
+
+        if (resizes.items.len == 0) return &.{};
+        return resizes.toOwnedSlice(allocator);
+    }
+
+    fn collectSurfaceResizesRecursive(self: *const Widget, allocator: std.mem.Allocator, resizes: *std.ArrayList(SurfaceResize)) !void {
+        switch (self.kind) {
+            .surface => |surf| {
+                if (self.width != surf.surface.cols or self.height != surf.surface.rows) {
+                    try resizes.append(allocator, .{
+                        .pty_id = surf.pty_id,
+                        .surface = surf.surface,
+                        .width = self.width,
+                        .height = self.height,
+                    });
+                }
+            },
+            .column => |col| {
+                for (col.children) |*child| {
+                    try child.collectSurfaceResizesRecursive(allocator, resizes);
+                }
+            },
+            .row => |row| {
+                for (row.children) |*child| {
+                    try child.collectSurfaceResizesRecursive(allocator, resizes);
+                }
+            },
+            .text => {},
+            .text_input => {},
+            .list => {},
+            .box => |b| {
+                try b.child.collectSurfaceResizesRecursive(allocator, resizes);
+            },
+            .padding => |p| {
+                try p.child.collectSurfaceResizesRecursive(allocator, resizes);
+            },
+            .stack => |stack| {
+                for (stack.children) |*child| {
+                    try child.collectSurfaceResizesRecursive(allocator, resizes);
+                }
+            },
+            .positioned => |pos| {
+                try pos.child.collectSurfaceResizesRecursive(allocator, resizes);
             },
         }
     }
