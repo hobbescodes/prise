@@ -221,6 +221,7 @@ pub const ServerAction = union(enum) {
     pub const ColorQueryTarget = struct {
         pty_id: u32,
         target: Target,
+        slot: usize, // Response slot for ordered delivery
 
         pub const Target = union(enum) {
             palette: u8,
@@ -399,6 +400,7 @@ pub const ClientLogic = struct {
         var pty_id: ?u32 = null;
         var index: ?u8 = null;
         var kind: ?[]const u8 = null;
+        var slot: ?usize = null;
 
         for (params.map) |kv| {
             if (kv.key != .string) continue;
@@ -416,13 +418,20 @@ pub const ClientLogic = struct {
                 };
             } else if (std.mem.eql(u8, kv.key.string, "kind")) {
                 kind = if (kv.value == .string) kv.value.string else null;
+            } else if (std.mem.eql(u8, kv.key.string, "slot")) {
+                slot = switch (kv.value) {
+                    .integer => |i| @intCast(i),
+                    .unsigned => |u| @intCast(u),
+                    else => null,
+                };
             }
         }
 
         const pid = pty_id orelse return .none;
+        const response_slot = slot orelse return .none;
 
         if (index) |idx| {
-            return .{ .color_query = .{ .pty_id = pid, .target = .{ .palette = idx } } };
+            return .{ .color_query = .{ .pty_id = pid, .target = .{ .palette = idx }, .slot = response_slot } };
         } else if (kind) |k| {
             const target: ServerAction.ColorQueryTarget.Target = if (std.mem.eql(u8, k, "foreground"))
                 .foreground
@@ -432,7 +441,7 @@ pub const ClientLogic = struct {
                 .cursor
             else
                 return .none;
-            return .{ .color_query = .{ .pty_id = pid, .target = target } };
+            return .{ .color_query = .{ .pty_id = pid, .target = target, .slot = response_slot } };
         }
 
         return .none;
@@ -647,6 +656,7 @@ pub const App = struct {
     pub const PendingColorQuery = struct {
         pty_id: u32,
         target: ServerAction.ColorQueryTarget.Target,
+        slot: usize,
     };
 
     pub fn init(allocator: std.mem.Allocator) !App {
@@ -1345,7 +1355,7 @@ pub const App = struct {
     }
 
     fn handleColorQuery(self: *App, query: ServerAction.ColorQueryTarget) !void {
-        log.debug("handleColorQuery: pty={} target={any}", .{ query.pty_id, query.target });
+        log.debug("handleColorQuery: pty={} slot={} target={any}", .{ query.pty_id, query.slot, query.target });
 
         // Check if we have the color cached
         const cached_color: ?vaxis.Cell.Color = switch (query.target) {
@@ -1357,10 +1367,14 @@ pub const App = struct {
 
         if (cached_color) |color| {
             // Send response immediately
-            try self.sendColorResponse(query.pty_id, query.target, color);
+            try self.sendColorResponse(query.pty_id, query.slot, query.target, color);
         } else {
             // Queue for later when we get the color_report
-            try self.pending_color_queries.append(self.allocator, .{ .pty_id = query.pty_id, .target = query.target });
+            try self.pending_color_queries.append(self.allocator, .{
+                .pty_id = query.pty_id,
+                .target = query.target,
+                .slot = query.slot,
+            });
 
             // Query the terminal for this color
             switch (query.target) {
@@ -1394,7 +1408,7 @@ pub const App = struct {
                 };
 
                 if (color) |c| {
-                    self.sendColorResponse(pending.pty_id, pending.target, c) catch |err| {
+                    self.sendColorResponse(pending.pty_id, pending.slot, pending.target, c) catch |err| {
                         log.err("Failed to send color response: {}", .{err});
                     };
                 }
@@ -1406,33 +1420,34 @@ pub const App = struct {
         }
     }
 
-    fn sendColorResponse(self: *App, pty_id: u32, target: ServerAction.ColorQueryTarget.Target, color: vaxis.Cell.Color) !void {
+    fn sendColorResponse(self: *App, pty_id: u32, slot: usize, target: ServerAction.ColorQueryTarget.Target, color: vaxis.Cell.Color) !void {
         const rgb = color.rgb;
-        log.debug("sendColorResponse: pty={} target={any} color=#{x:0>2}{x:0>2}{x:0>2}", .{ pty_id, target, rgb[0], rgb[1], rgb[2] });
+        log.debug("sendColorResponse: pty={} slot={} target={any} color=#{x:0>2}{x:0>2}{x:0>2}", .{ pty_id, slot, target, rgb[0], rgb[1], rgb[2] });
 
         // Build the color_response notification
-        // Format: [2, "color_response", {pty_id: N, r: R, g: G, b: B, index: M}] or
-        //         [2, "color_response", {pty_id: N, r: R, g: G, b: B, kind: "foreground"}]
-        var map_items = try self.allocator.alloc(msgpack.Value.KeyValue, 5);
+        // Format: [2, "color_response", {pty_id: N, slot: S, r: R, g: G, b: B, index: M}] or
+        //         [2, "color_response", {pty_id: N, slot: S, r: R, g: G, b: B, kind: "foreground"}]
+        var map_items = try self.allocator.alloc(msgpack.Value.KeyValue, 6);
         defer self.allocator.free(map_items);
 
         map_items[0] = .{ .key = .{ .string = "pty_id" }, .value = .{ .unsigned = pty_id } };
-        map_items[1] = .{ .key = .{ .string = "r" }, .value = .{ .unsigned = rgb[0] } };
-        map_items[2] = .{ .key = .{ .string = "g" }, .value = .{ .unsigned = rgb[1] } };
-        map_items[3] = .{ .key = .{ .string = "b" }, .value = .{ .unsigned = rgb[2] } };
+        map_items[1] = .{ .key = .{ .string = "slot" }, .value = .{ .unsigned = slot } };
+        map_items[2] = .{ .key = .{ .string = "r" }, .value = .{ .unsigned = rgb[0] } };
+        map_items[3] = .{ .key = .{ .string = "g" }, .value = .{ .unsigned = rgb[1] } };
+        map_items[4] = .{ .key = .{ .string = "b" }, .value = .{ .unsigned = rgb[2] } };
 
         switch (target) {
             .palette => |idx| {
-                map_items[4] = .{ .key = .{ .string = "index" }, .value = .{ .unsigned = idx } };
+                map_items[5] = .{ .key = .{ .string = "index" }, .value = .{ .unsigned = idx } };
             },
             .foreground => {
-                map_items[4] = .{ .key = .{ .string = "kind" }, .value = .{ .string = "foreground" } };
+                map_items[5] = .{ .key = .{ .string = "kind" }, .value = .{ .string = "foreground" } };
             },
             .background => {
-                map_items[4] = .{ .key = .{ .string = "kind" }, .value = .{ .string = "background" } };
+                map_items[5] = .{ .key = .{ .string = "kind" }, .value = .{ .string = "background" } };
             },
             .cursor => {
-                map_items[4] = .{ .key = .{ .string = "kind" }, .value = .{ .string = "cursor" } };
+                map_items[5] = .{ .key = .{ .string = "kind" }, .value = .{ .string = "cursor" } };
             },
         }
 
