@@ -758,6 +758,7 @@ test {
     _ = @import("lua_test.zig");
     _ = @import("key_string.zig");
     _ = @import("action.zig");
+    _ = @import("keybind_compiler.zig");
 
     if (builtin.os.tag.isDarwin() or builtin.os.tag.isBSD()) {
         _ = @import("io/kqueue.zig");
