@@ -116,4 +116,13 @@ function prise.create_text_input() end
 ---@return integer
 function prise.gwidth(str) end
 
+---Get the current time formatted as HH:MM
+---@return string
+function prise.get_time() end
+
+---Get the git branch for a directory
+---@param cwd string The directory to check
+---@return string? The branch name, or nil if not a git repo
+function prise.get_git_branch(cwd) end
+
 return prise

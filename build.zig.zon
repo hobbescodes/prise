@@ -16,6 +16,10 @@
             .url = "https://github.com/natecraddock/ziglua/archive/af970851f5412a32c9eceb1c4519679a242c6093.tar.gz",
             .hash = "zlua-0.1.0-hGRpCx89BQCdTNT2LiQGKujXawO2jCgB4hGl0WEqj0cz",
         },
+        .zeit = .{
+            .url = "git+https://github.com/rockorager/zeit#7ac64d72dbfb1a4ad549102e7d4e232a687d32d8",
+            .hash = "zeit-0.6.0-5I6bk36tAgATpSl9wjFmRPMqYN2Mn0JQHgIcRNcqDpJA",
+        },
     },
     .paths = .{
         "build.zig",

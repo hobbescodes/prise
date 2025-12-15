@@ -4,6 +4,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const vaxis = @import("vaxis");
+const zeit = @import("zeit");
 const ziglua = @import("zlua");
 
 const io = @import("io.zig");
@@ -68,6 +69,7 @@ fn registerTimerMetatable(lua: *ziglua.Lua) void {
 pub const UI = struct {
     allocator: std.mem.Allocator,
     lua: *ziglua.Lua,
+    local_tz: zeit.TimeZone,
     loop: ?*io.Loop = null,
     exit_callback: ?*const fn (ctx: *anyopaque) void = null,
     exit_ctx: *anyopaque = undefined,
@@ -96,6 +98,9 @@ pub const UI = struct {
     pub fn init(allocator: std.mem.Allocator) !UI {
         const lua = try ziglua.Lua.init(allocator);
         errdefer lua.deinit();
+
+        const local_tz = try zeit.local(allocator, null);
+        errdefer local_tz.deinit();
 
         lua.openLibs();
 
@@ -191,6 +196,7 @@ pub const UI = struct {
         return .{
             .allocator = allocator,
             .lua = lua,
+            .local_tz = local_tz,
             .text_inputs = std.AutoHashMap(u32, *TextInput).init(allocator),
         };
     }
@@ -391,6 +397,14 @@ pub const UI = struct {
         // Register gwidth
         lua.pushFunction(ziglua.wrap(gwidth));
         lua.setField(-2, "gwidth");
+
+        // Register get_time
+        lua.pushFunction(ziglua.wrap(getTime));
+        lua.setField(-2, "get_time");
+
+        // Register get_git_branch
+        lua.pushFunction(ziglua.wrap(getGitBranch));
+        lua.setField(-2, "get_git_branch");
 
         registerTimerMetatable(lua);
 
@@ -650,6 +664,70 @@ pub const UI = struct {
         return 1;
     }
 
+    fn getTime(lua: *ziglua.Lua) i32 {
+        _ = lua.getField(ziglua.registry_index, "prise_ui_ptr");
+        const ui = lua.toUserdata(UI, -1) catch {
+            lua.pushNil();
+            return 1;
+        };
+        lua.pop(1);
+
+        const now = zeit.instant(.{}) catch {
+            lua.pushNil();
+            return 1;
+        };
+        const local_instant = now.in(&ui.local_tz);
+        const local_time = local_instant.time();
+        const weekday = zeit.weekdayFromDays(zeit.daysSinceEpoch(local_instant.unixTimestamp()));
+
+        var buf: [16]u8 = undefined;
+        const time_str = std.fmt.bufPrint(&buf, "{s} {d:0>2}:{d:0>2}", .{ weekday.shortName(), local_time.hour, local_time.minute }) catch {
+            lua.pushNil();
+            return 1;
+        };
+        _ = lua.pushString(time_str);
+        return 1;
+    }
+
+    fn getGitBranch(lua: *ziglua.Lua) i32 {
+        _ = lua.getField(ziglua.registry_index, "prise_ui_ptr");
+        const ui = lua.toUserdata(UI, -1) catch {
+            lua.pushNil();
+            return 1;
+        };
+        lua.pop(1);
+
+        const cwd = lua.toString(1) catch {
+            lua.pushNil();
+            return 1;
+        };
+
+        const result = std.process.Child.run(.{
+            .allocator = ui.allocator,
+            .argv = &.{ "git", "rev-parse", "--abbrev-ref", "HEAD" },
+            .cwd = cwd,
+        }) catch {
+            lua.pushNil();
+            return 1;
+        };
+        defer ui.allocator.free(result.stdout);
+        defer ui.allocator.free(result.stderr);
+
+        if (result.term.Exited != 0) {
+            lua.pushNil();
+            return 1;
+        }
+
+        const branch = std.mem.trimRight(u8, result.stdout, "\n\r");
+        if (branch.len == 0) {
+            lua.pushNil();
+            return 1;
+        }
+
+        _ = lua.pushString(branch);
+        return 1;
+    }
+
     fn setTimeout(lua: *ziglua.Lua) i32 {
         // Get UI ptr
         _ = lua.getField(ziglua.registry_index, "prise_ui_ptr");
@@ -765,6 +843,7 @@ pub const UI = struct {
             self.allocator.destroy(entry.value_ptr.*);
         }
         self.text_inputs.deinit();
+        self.local_tz.deinit();
         self.lua.deinit();
     }
 

@@ -36,6 +36,9 @@ pub fn build(b: *std.Build) void {
     });
     exe_mod.addImport("zlua", zlua.module("zlua"));
 
+    const zeit = b.dependency("zeit", .{});
+    exe_mod.addImport("zeit", zeit.module("zeit"));
+
     const exe = b.addExecutable(.{
         .name = "prise",
         .root_module = exe_mod,

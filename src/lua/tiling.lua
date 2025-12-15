@@ -242,6 +242,7 @@ local state = {
     app_focused = true,
     pending_command = false,
     timer = nil,
+    clock_timer = nil,
     pending_split = nil,
     pending_new_tab = false,
     next_split_id = 1,
@@ -858,38 +859,6 @@ local function should_show_borders()
     end
     local root = get_active_root()
     return count_panes(root) > 1
-end
-
----Get index of focused pane (1-based) and total count in active tab
----@return number index
----@return number total
-local function get_pane_position()
-    local root = get_active_root()
-    if not root or not state.focused_id then
-        return 1, 1
-    end
-
-    local index = 0
-    ---@type number
-    local found_index = 1
-
-    ---@param n Node
-    local function walk(n)
-        if is_pane(n) then
-            index = index + 1
-            if n.id == state.focused_id then
-                found_index = index
-            end
-        elseif is_split(n) then
-            ---@cast n Split
-            for _, child in ipairs(n.children) do
-                walk(child)
-            end
-        end
-    end
-
-    walk(root)
-    return found_index, index
 end
 
 ---Serialize a node tree to a table with pty_ids instead of userdata
@@ -2456,61 +2425,85 @@ local function build_status_bar()
     local session_name = (prise.get_session_name() or "prise"):upper()
     local mode_text = state.pending_command and " CMD " or (" " .. session_name .. " ")
 
-    -- Get pane title
-    local title = "Terminal"
+    -- Get git branch from focused pane's cwd
+    local git_branch = nil
     local root = get_active_root()
     if state.focused_id and root then
         local path = find_node_path(root, state.focused_id)
         if path then
             local pane = path[#path]
-            local t = pane.pty:title()
-            if t and #t > 0 then
-                title = t
+            local cwd = pane.pty:cwd()
+            if cwd then
+                git_branch = prise.get_git_branch(cwd)
             end
         end
     end
 
-    -- Get pane position
-    local pane_idx, pane_total = get_pane_position()
-    local pane_info = string.format(" %d/%d ", pane_idx, pane_total)
+    -- Get current time
+    local time_str = prise.get_time()
 
-    -- Tab info (if multiple tabs)
-    local tab_info = ""
-    if #state.tabs > 1 then
-        tab_info = string.format(" Tab %d/%d ", state.active_tab, #state.tabs)
+    -- Build segments and track width
+    local segments = {}
+    local left_width = 0
+
+    -- Mode indicator
+    table.insert(segments, { text = mode_text, style = { bg = mode_color, fg = THEME.fg_dark, bold = true } })
+    left_width = left_width + prise.gwidth(mode_text)
+
+    -- Track the last background color for proper powerline transitions
+    local last_bg = mode_color
+
+    -- Git branch
+    if git_branch then
+        local branch_text = "  " .. git_branch .. " "
+        table.insert(segments, { text = POWERLINE_SYMBOLS.right_solid, style = { fg = last_bg, bg = THEME.bg2 } })
+        table.insert(segments, { text = branch_text, style = { bg = THEME.bg2, fg = THEME.fg_bright } })
+        left_width = left_width + 1 + prise.gwidth(branch_text)
+        last_bg = THEME.bg2
     end
 
-    -- Build the segments
-    local segments = {
-        -- Left side: mode indicator
-        { text = mode_text, style = { bg = mode_color, fg = THEME.fg_dark, bold = true } },
-        { text = POWERLINE_SYMBOLS.right_solid, style = { fg = mode_color, bg = THEME.bg2 } },
-
-        -- Title section
-        { text = " " .. title .. " ", style = { bg = THEME.bg2, fg = THEME.fg_bright } },
-        { text = POWERLINE_SYMBOLS.right_solid, style = { fg = THEME.bg2, bg = THEME.bg3 } },
-
-        -- Pane info
-        { text = pane_info, style = { bg = THEME.bg3, fg = THEME.fg_dim } },
-    }
-
-    -- Add zoom indicator if zoomed
+    -- Zoom indicator
     if state.zoomed_pane_id then
-        table.insert(segments, { text = POWERLINE_SYMBOLS.right_solid, style = { fg = THEME.bg3, bg = THEME.yellow } })
+        table.insert(segments, { text = POWERLINE_SYMBOLS.right_solid, style = { fg = last_bg, bg = THEME.yellow } })
         table.insert(segments, { text = " ZOOM ", style = { bg = THEME.yellow, fg = THEME.fg_dark, bold = true } })
-        table.insert(segments, { text = POWERLINE_SYMBOLS.right_solid, style = { fg = THEME.yellow, bg = THEME.bg3 } })
+        left_width = left_width + 1 + 6
+        last_bg = THEME.yellow
     end
 
-    -- Add tab info if applicable
-    if #state.tabs > 1 then
-        table.insert(segments, { text = POWERLINE_SYMBOLS.right_solid, style = { fg = THEME.bg3, bg = THEME.bg4 } })
-        table.insert(segments, { text = tab_info, style = { bg = THEME.bg4, fg = THEME.fg_dim } })
-        table.insert(segments, { text = POWERLINE_SYMBOLS.right_solid, style = { fg = THEME.bg4, bg = THEME.bg1 } })
-    else
-        table.insert(segments, { text = POWERLINE_SYMBOLS.right_solid, style = { fg = THEME.bg3, bg = THEME.bg1 } })
+    -- End left side
+    table.insert(segments, { text = POWERLINE_SYMBOLS.right_solid, style = { fg = last_bg, bg = THEME.bg1 } })
+    left_width = left_width + 1
+
+    -- Right side content
+    local right_text = " " .. time_str .. " "
+    local right_width = 1 + prise.gwidth(right_text) -- powerline symbol + time
+
+    -- Calculate padding to fill the middle
+    local padding = state.screen_cols - left_width - right_width
+    if padding < 0 then
+        padding = 0
     end
+
+    -- Add padding
+    table.insert(segments, { text = string.rep(" ", padding), style = { bg = THEME.bg1 } })
+
+    -- Add right side
+    table.insert(segments, { text = POWERLINE_SYMBOLS.left_solid, style = { fg = THEME.bg3, bg = THEME.bg1 } })
+    table.insert(segments, { text = right_text, style = { bg = THEME.bg3, fg = THEME.fg_dim } })
 
     return prise.Text(segments)
+end
+
+---Schedule a clock timer to refresh the display every minute
+local function schedule_clock_timer()
+    if state.clock_timer then
+        return
+    end
+    state.clock_timer = prise.set_timeout(60000, function()
+        state.clock_timer = nil
+        prise.request_frame()
+        schedule_clock_timer()
+    end)
 end
 
 ---@return table
@@ -2521,6 +2514,11 @@ function M.view()
             cross_axis_align = "stretch",
             children = { prise.Text("Waiting for terminal...") },
         })
+    end
+
+    -- Start clock timer for status bar updates
+    if config.status_bar.enabled then
+        schedule_clock_timer()
     end
 
     local palette = build_palette()
