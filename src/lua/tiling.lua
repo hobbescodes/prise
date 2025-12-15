@@ -39,6 +39,14 @@ local utils = require("utils")
 ---@field visible boolean
 ---@field input? TextInput
 
+---@class SessionPickerState
+---@field visible boolean
+---@field input? TextInput
+---@field selected number
+---@field scroll_offset number
+---@field sessions string[]
+---@field regions PaletteRegion[]
+
 ---@class State
 ---@field tabs Tab[]
 ---@field active_tab integer
@@ -54,6 +62,7 @@ local utils = require("utils")
 ---@field palette PaletteState
 ---@field rename RenameState
 ---@field rename_tab RenameState
+---@field session_picker SessionPickerState
 ---@field screen_cols number
 ---@field screen_rows number
 ---@field keybind_matcher? KeybindMatcher
@@ -293,6 +302,15 @@ local state = {
     rename_tab = {
         visible = false,
         input = nil, -- TextInput handle
+    },
+    -- Session switcher
+    session_picker = {
+        visible = false,
+        input = nil, -- TextInput handle
+        selected = 1,
+        scroll_offset = 0,
+        sessions = {}, -- List of session names
+        regions = {}, -- Click regions for items
     },
     -- Tab bar hit regions: array of {start_x, end_x, tab_index}
     tab_regions = {},
@@ -1731,6 +1749,51 @@ local function execute_rename()
     close_rename()
 end
 
+local function open_session_picker()
+    if not state.session_picker.input then
+        state.session_picker.input = prise.create_text_input()
+    end
+    state.session_picker.input:clear()
+    state.session_picker.sessions = prise.list_sessions() or {}
+    state.session_picker.selected = 1
+    state.session_picker.scroll_offset = 0
+    state.session_picker.visible = true
+    prise.request_frame()
+end
+
+local function close_session_picker()
+    state.session_picker.visible = false
+    prise.request_frame()
+end
+
+---Filter sessions by fuzzy matching the input text
+---@param query string
+---@return string[]
+local function filter_sessions(query)
+    if not query or query == "" then
+        return state.session_picker.sessions
+    end
+    local lower_query = query:lower()
+    local matches = {}
+    for _, session in ipairs(state.session_picker.sessions) do
+        if session:lower():find(lower_query, 1, true) then
+            table.insert(matches, session)
+        end
+    end
+    return matches
+end
+
+local function execute_session_switch()
+    local query = state.session_picker.input:text()
+    local filtered = filter_sessions(query)
+    local idx = state.session_picker.selected
+    if idx >= 1 and idx <= #filtered then
+        local target = filtered[idx]
+        close_session_picker()
+        prise.switch_session(target)
+    end
+end
+
 -- --- Main Functions ---
 
 ---@param event Event
@@ -1850,6 +1913,54 @@ function M.update(event)
             return
         end
 
+        -- Handle session picker
+        if state.session_picker.visible then
+            local k = event.data.key
+            local filtered = filter_sessions(state.session_picker.input:text())
+
+            if k == "Escape" then
+                close_session_picker()
+                return
+            elseif k == "Enter" then
+                execute_session_switch()
+                return
+            elseif k == "ArrowUp" or (k == "p" and event.data.ctrl) then
+                if state.session_picker.selected > 1 then
+                    state.session_picker.selected = state.session_picker.selected - 1
+                    -- Adjust scroll if needed
+                    if state.session_picker.selected <= state.session_picker.scroll_offset then
+                        state.session_picker.scroll_offset = state.session_picker.selected - 1
+                    end
+                end
+                prise.request_frame()
+                return
+            elseif k == "ArrowDown" or (k == "n" and event.data.ctrl) then
+                if state.session_picker.selected < #filtered then
+                    state.session_picker.selected = state.session_picker.selected + 1
+                    -- Adjust scroll if needed (visible height approx screen_rows - 15)
+                    local visible_height = math.max(1, state.screen_rows - 15)
+                    if state.session_picker.selected > state.session_picker.scroll_offset + visible_height then
+                        state.session_picker.scroll_offset = state.session_picker.selected - visible_height
+                    end
+                end
+                prise.request_frame()
+                return
+            elseif k == "Backspace" then
+                state.session_picker.input:delete_backward()
+                state.session_picker.selected = 1
+                state.session_picker.scroll_offset = 0
+                prise.request_frame()
+                return
+            elseif #k == 1 and not event.data.ctrl and not event.data.alt and not event.data.super then
+                state.session_picker.input:insert(k)
+                state.session_picker.selected = 1
+                state.session_picker.scroll_offset = 0
+                prise.request_frame()
+                return
+            end
+            return
+        end
+
         -- Handle rename session prompt
         if state.rename.visible then
             local k = event.data.key
@@ -1908,7 +2019,164 @@ function M.update(event)
             state.pending_command = true
             prise.request_frame()
 
+<<<<<<< HEAD
             -- Cancel existing timeout and start new one
+=======
+        -- Handle pending command mode (after Super/Cmd+k)
+        if state.pending_command then
+            local handled = false
+            local k = event.data.key
+
+            -- Leader twice sends leader to inner shell (like tmux)
+            if matches_keybind(event.data, config.keybinds.leader) then
+                local pty = get_focused_pty()
+                if pty then
+                    pty:send_key(event.data)
+                end
+                if state.timer then
+                    state.timer:cancel()
+                    state.timer = nil
+                end
+                state.pending_command = false
+                prise.request_frame()
+                return
+            end
+
+            if k == "h" then
+                move_focus("left")
+                handled = true
+            elseif k == "l" then
+                move_focus("right")
+                handled = true
+            elseif k == "j" then
+                move_focus("down")
+                handled = true
+            elseif k == "k" then
+                move_focus("up")
+                handled = true
+            elseif k == "H" then
+                resize_pane("width", -RESIZE_STEP)
+                handled = true
+            elseif k == "L" then
+                resize_pane("width", RESIZE_STEP)
+                handled = true
+            elseif k == "J" then
+                resize_pane("height", RESIZE_STEP)
+                handled = true
+            elseif k == "K" then
+                resize_pane("height", -RESIZE_STEP)
+                handled = true
+            elseif k == "%" or k == "v" then
+                -- Split horizontal (side-by-side)
+                local pty = get_focused_pty()
+                state.pending_split = { direction = "row" }
+                prise.spawn({ cwd = pty and pty:cwd() })
+                handled = true
+            elseif k == '"' or k == "'" or k == "s" then
+                -- Split vertical (top-bottom)
+                local pty = get_focused_pty()
+                state.pending_split = { direction = "col" }
+                prise.spawn({ cwd = pty and pty:cwd() })
+                handled = true
+            elseif k == "d" then
+                -- Detach from session
+                detach_session()
+                handled = true
+            elseif k == "t" then
+                -- New tab
+                local pty = get_focused_pty()
+                state.pending_new_tab = true
+                prise.spawn({ cwd = pty and pty:cwd() })
+                handled = true
+            elseif k == "n" then
+                -- Next tab
+                if #state.tabs > 1 then
+                    local next_idx = state.active_tab % #state.tabs + 1
+                    set_active_tab_index(next_idx)
+                end
+                handled = true
+            elseif k == "p" then
+                -- Previous tab
+                if #state.tabs > 1 then
+                    local prev_idx = (state.active_tab - 2 + #state.tabs) % #state.tabs + 1
+                    set_active_tab_index(prev_idx)
+                end
+                handled = true
+            elseif k == "c" then
+                -- Close current tab
+                close_current_tab()
+                handled = true
+            elseif k == "r" then
+                -- Rename current tab
+                open_rename_tab()
+                handled = true
+            elseif k == "S" then
+                -- Switch/swap session
+                open_session_picker()
+                handled = true
+            elseif k == "R" then
+                -- Rename session
+                open_rename()
+                handled = true
+            elseif k >= "1" and k <= "9" then
+                -- Switch to tab N
+                local idx = math.tointeger(tonumber(k))
+                if idx and idx <= #state.tabs then
+                    set_active_tab_index(idx)
+                end
+                handled = true
+            elseif k == "0" then
+                -- Switch to tab 10
+                if 10 <= #state.tabs then
+                    set_active_tab_index(10)
+                end
+                handled = true
+            elseif k == "w" then
+                -- Close current pane
+                local root = get_active_root()
+                local path = state.focused_id and find_node_path(root, state.focused_id)
+                if path then
+                    local pane = path[#path]
+                    pane.pty:close()
+                    local was_last = remove_pane_by_id(pane.id)
+                    if not was_last then
+                        prise.save()
+                    end
+                    handled = true
+                end
+            elseif k == "q" then
+                -- Quit
+                detach_session()
+                handled = true
+            elseif k == "z" then
+                -- Toggle zoom
+                if state.zoomed_pane_id then
+                    state.zoomed_pane_id = nil
+                elseif state.focused_id then
+                    state.zoomed_pane_id = state.focused_id
+                end
+                handled = true
+            elseif k == "Enter" or k == "\r" or k == "\n" then
+                local pty = get_focused_pty()
+                state.pending_split = { direction = get_auto_split_direction() }
+                prise.spawn({ cwd = pty and pty:cwd() })
+                handled = true
+            elseif k == "Escape" then
+                handled = true
+            end
+
+            if handled then
+                if state.timer then
+                    state.timer:cancel()
+                    state.timer = nil
+                end
+                state.pending_command = false
+                prise.request_frame()
+                return
+            end
+
+            -- Reset timeout
+>>>>>>> c0e82165ba9e (Add session picker)
             if state.timer then
                 state.timer:cancel()
             end
@@ -2425,6 +2693,90 @@ local function build_rename_tab()
     })
 end
 
+---Build the session picker modal
+---@return table?
+local function build_session_picker()
+    if not state.session_picker.visible or not state.session_picker.input then
+        state.session_picker.regions = {}
+        return nil
+    end
+
+    local text = state.session_picker.input:text()
+    local filtered = filter_sessions(text)
+    local has_sessions = #filtered > 0
+
+    local items = {}
+    local current_session = prise.get_session_name()
+    for _, session in ipairs(filtered) do
+        local display = session
+        if session == current_session then
+            display = session .. " (current)"
+        end
+        table.insert(items, display)
+    end
+
+    if not has_sessions then
+        table.insert(items, "No sessions found")
+    end
+
+    local palette_style = { bg = THEME.bg1, fg = THEME.fg_bright }
+    local selected_style = { bg = THEME.accent, fg = THEME.fg_dark }
+    local input_style = { bg = THEME.bg1, fg = THEME.fg_bright }
+
+    -- Calculate click regions for visible items
+    local items_start_y = 5 + 1 + 1 + 1 -- palette_y + padding + input + separator
+    state.session_picker.regions = {}
+    if has_sessions then
+        local available_height = state.screen_rows - items_start_y - 1
+        local visible_count = math.min(#items - state.session_picker.scroll_offset, available_height)
+        for display_row = 1, visible_count do
+            local item_index = state.session_picker.scroll_offset + display_row
+            table.insert(state.session_picker.regions, {
+                start_y = items_start_y + (display_row - 1),
+                end_y = items_start_y + display_row,
+                index = item_index,
+            })
+        end
+    end
+
+    return prise.Positioned({
+        anchor = "top_center",
+        y = 5,
+        focus = true,
+        child = prise.Box({
+            border = "none",
+            max_width = PALETTE_WIDTH,
+            style = palette_style,
+            focus = true,
+            child = prise.Padding({
+                top = 1,
+                bottom = 1,
+                left = 2,
+                right = 2,
+                child = prise.Column({
+                    cross_axis_align = "stretch",
+                    children = {
+                        prise.Text({ text = "Switch Session", style = { fg = THEME.fg_dim } }),
+                        prise.TextInput({
+                            input = state.session_picker.input,
+                            style = input_style,
+                            focus = true,
+                        }),
+                        prise.Text({ text = string.rep("─", PALETTE_WIDTH), style = { fg = THEME.bg3 } }),
+                        prise.List({
+                            items = items,
+                            selected = state.session_picker.selected,
+                            scroll_offset = state.session_picker.scroll_offset,
+                            style = palette_style,
+                            selected_style = selected_style,
+                        }),
+                    },
+                }),
+            }),
+        }),
+    })
+end
+
 ---Build the tab bar (only shown if more than 1 tab)
 ---@return table?
 local function build_tab_bar()
@@ -2663,11 +3015,15 @@ function M.view()
     local palette = build_palette()
     local rename = build_rename()
     local rename_tab = build_rename_tab()
+    local session_picker = build_session_picker()
     local tab_bar = build_tab_bar()
     prise.log.debug("view: palette.visible=" .. tostring(state.palette.visible))
 
     -- When zoomed, render only the zoomed pane
-    local overlay_visible = state.palette.visible or state.rename.visible or state.rename_tab.visible
+    local overlay_visible = state.palette.visible
+        or state.rename.visible
+        or state.rename_tab.visible
+        or state.session_picker.visible
     local content
     if state.zoomed_pane_id then
         local path = find_node_path(root, state.zoomed_pane_id)
@@ -2713,7 +3069,7 @@ function M.view()
         children = main_children,
     })
 
-    local overlay = palette or rename or rename_tab
+    local overlay = palette or rename or rename_tab or session_picker
     if overlay then
         return prise.Stack({
             children = {
