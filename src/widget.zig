@@ -65,6 +65,17 @@ pub const SplitHandle = struct {
         const start: f64 = @floatFromInt(self.start);
         const end: f64 = @floatFromInt(self.end);
 
+        const has_separator = self.separator_space > 0;
+
+        if (has_separator) {
+            const cell_x: u16 = @intFromFloat(px);
+            const cell_y: u16 = @intFromFloat(py);
+            return switch (self.axis) {
+                .horizontal => cell_x == self.boundary and cell_y >= self.start and cell_y < self.end,
+                .vertical => cell_y == self.boundary and cell_x >= self.start and cell_x < self.end,
+            };
+        }
+
         return switch (self.axis) {
             .horizontal => @abs(px - boundary) < 0.5 and py >= start and py < end,
             .vertical => @abs(py - boundary) < 0.5 and px >= start and px < end,
@@ -500,7 +511,8 @@ pub const Widget = struct {
                     try child.collectSplitHandlesRecursive(allocator, handles, abs_x, abs_y);
 
                     // Add handle after this child (except for last child), only if resizable
-                    if (row.resizable and i < row.children.len - 1) {
+                    // Skip separator widgets - the handle is on the separator itself, not after it
+                    if (row.resizable and i < row.children.len - 1 and child.kind != .separator) {
                         try handles.append(allocator, .{
                             .parent_id = self.id,
                             .child_index = @intCast(i),
@@ -529,7 +541,8 @@ pub const Widget = struct {
                     try child.collectSplitHandlesRecursive(allocator, handles, abs_x, abs_y);
 
                     // Add handle after this child (except for last child), only if resizable
-                    if (col.resizable and i < col.children.len - 1) {
+                    // Skip separator widgets - the handle is on the separator itself, not after it
+                    if (col.resizable and i < col.children.len - 1 and child.kind != .separator) {
                         try handles.append(allocator, .{
                             .parent_id = self.id,
                             .child_index = @intCast(i),
