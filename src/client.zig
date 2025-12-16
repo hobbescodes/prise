@@ -8,7 +8,8 @@ const msgpack = @import("msgpack.zig");
 const redraw = @import("redraw.zig");
 const rpc = @import("rpc.zig");
 const Surface = @import("Surface.zig");
-const UI = @import("ui.zig").UI;
+const ui_mod = @import("ui.zig");
+const UI = ui_mod.UI;
 const vaxis_helper = @import("vaxis_helper.zig");
 const widget = @import("widget.zig");
 const posix = std.posix;
@@ -659,14 +660,26 @@ pub const App = struct {
         slot: usize,
     };
 
-    pub fn init(allocator: std.mem.Allocator) !App {
+    pub const InitError = struct {
+        err: anyerror,
+        lua_msg: ?[:0]const u8,
+    };
+
+    pub const InitResult = union(enum) {
+        ok: App,
+        err: InitError,
+    };
+
+    pub fn init(allocator: std.mem.Allocator) InitResult {
         var app: App = .{
             .allocator = allocator,
-            .vx = try vaxis.init(allocator, .{
+            .vx = vaxis.init(allocator, .{
                 .kitty_keyboard_flags = .{
                     .report_events = true,
                 },
-            }),
+            }) catch |err| {
+                return .{ .err = .{ .err = err, .lua_msg = null } };
+            },
             .tty = undefined,
             .tty_buffer = undefined,
             .msg_buffer = .empty,
@@ -677,27 +690,33 @@ pub const App = struct {
             .pending_attach_cwd = std.AutoHashMap(u32, []const u8).init(allocator),
             .pending_color_queries = .empty,
         };
-        app.tty = try vaxis.Tty.init(&app.tty_buffer);
-        // parser doesn't need init? assuming default init is fine or init(&allocator)
+        app.tty = vaxis.Tty.init(&app.tty_buffer) catch |err| {
+            return .{ .err = .{ .err = err, .lua_msg = null } };
+        };
         app.parser = .{};
 
         log.info("Vaxis initialized", .{});
 
         // Initialize Lua UI
-        app.ui = UI.init(allocator) catch |err| {
-            app.vx.deinit(allocator, app.tty.writer());
-            app.tty.deinit();
-            return err;
-        };
+        switch (UI.init(allocator)) {
+            .ok => |ui| app.ui = ui,
+            .err => |init_err| {
+                app.vx.deinit(allocator, app.tty.writer());
+                app.tty.deinit();
+                return .{ .err = .{ .err = init_err.err, .lua_msg = init_err.lua_msg } };
+            },
+        }
         log.info("Lua UI initialized", .{});
 
         // Create pipe for TTY thread -> Main thread communication
-        const fds = try posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
+        const fds = posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true }) catch |err| {
+            return .{ .err = .{ .err = err, .lua_msg = null } };
+        };
         app.pipe_read_fd = fds[0];
         app.pipe_write_fd = fds[1];
         log.info("Pipe created: read_fd={} write_fd={}", .{ app.pipe_read_fd, app.pipe_write_fd });
 
-        return app;
+        return .{ .ok = app };
     }
 
     pub fn deinit(self: *App) void {

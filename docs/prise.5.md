@@ -95,7 +95,7 @@ The **borders** table configures pane borders for visual separation.
 :   Enable or disable pane borders globally. Default: **false**
 
 **show_single_pane**
-:   Show borders when only one pane exists in a tab. When false, borders only appear after creating a split. Default: **false**
+:   Show border when only one pane exists. Default: **false**
 
 **style**
 :   Border drawing style. Options: **"none"**, **"single"**, **"double"**, **"rounded"**. Default: **"single"**
@@ -149,32 +149,34 @@ The **tab_bar** table configures the tab bar.
 **show_single_tab**
 :   Show the tab bar even with only one tab. Default: **false**
 
-# KEYBINDS
+# MACOS OPTION KEY
 
-The **keybinds** table configures key bindings.
+**macos_option_as_alt**
+:   Controls how the macOS Option key behaves. Options: **"false"**, **"left"**, **"right"**, **"true"**. Default: **"false"**
 
-**leader**
-:   Key to enter command mode. Default: **{ key = "k", super = true }**
-
-**palette**
-:   Key to open command palette. Default: **{ key = "p", super = true }**
-
-Each keybind is a table with:
-
-- **key**: The key character (e.g., "k", "p")
-- **ctrl**: Require Ctrl modifier (boolean)
-- **alt**: Require Alt modifier (boolean)
-- **shift**: Require Shift modifier (boolean)
-- **super**: Require Super/Cmd modifier (boolean)
+When set to **"false"**, Option produces special characters (e.g., Option+e for é).
+When set to **"left"**, **"right"**, or **"true"**, the corresponding Option key(s)
+act as Alt for keybindings and terminal applications.
 
 Example:
 
 ```lua
 ui.setup({
-    keybinds = {
-        leader = { key = "a", ctrl = true },
-        palette = { key = "Space", ctrl = true, shift = true },
-    },
+    macos_option_as_alt = "true",
+})
+```
+
+# LEADER KEY
+
+**leader**
+:   The leader key sequence used as a prefix for keybindings. Uses vim-style
+    notation (see Key Notation below). Default: **"<D-k>"** (Super+k)
+
+Example:
+
+```lua
+ui.setup({
+    leader = "<C-a>",  -- Use Ctrl+a as leader
 })
 ```
 
@@ -193,36 +195,36 @@ special keys. Plain characters can be written directly.
 
 ## Modifiers
 
-- **\<C-x\>** - Ctrl+x
-- **\<A-x\>** - Alt+x
-- **\<S-x\>** - Shift+x
-- **\<D-x\>** - Super/Cmd+x
-- **\<leader\>** - Expands to the configured leader key
+- **<C-x>** - Ctrl+x
+- **<A-x>** - Alt+x
+- **<S-x>** - Shift+x
+- **<D-x>** - Super/Cmd+x
+- **<leader>** - Expands to the configured leader key
 
-Modifiers can be combined: **\<C-A-x\>** for Ctrl+Alt+x, **\<C-S-D-a\>** for
+Modifiers can be combined: **<C-A-x>** for Ctrl+Alt+x, **<C-S-D-a>** for
 Ctrl+Shift+Super+a.
 
 ## Special Keys
 
-- **\<Enter\>**, **\<Return\>**, **\<CR\>** - Enter key
-- **\<Tab\>** - Tab key
-- **\<Esc\>**, **\<Escape\>** - Escape key
-- **\<Space\>** - Space bar
-- **\<BS\>**, **\<Backspace\>** - Backspace key
-- **\<Del\>**, **\<Delete\>** - Delete key
-- **\<Up\>**, **\<Down\>**, **\<Left\>**, **\<Right\>** - Arrow keys
-- **\<Home\>**, **\<End\>** - Home/End keys
-- **\<PageUp\>**, **\<PageDown\>** - Page Up/Down keys
-- **\<Insert\>** - Insert key
-- **\<F1\>** through **\<F12\>** - Function keys
+- **<Enter>**, **<Return>**, **<CR>** - Enter key
+- **<Tab>** - Tab key
+- **<Esc>**, **<Escape>** - Escape key
+- **<Space>** - Space bar
+- **<BS>**, **<Backspace>** - Backspace key
+- **<Del>**, **<Delete>** - Delete key
+- **<Up>**, **<Down>**, **<Left>**, **<Right>** - Arrow keys
+- **<Home>**, **<End>** - Home/End keys
+- **<PageUp>**, **<PageDown>** - Page Up/Down keys
+- **<Insert>** - Insert key
+- **<F1>** through **<F12>** - Function keys
 
 ## Examples
 
 - **a** - The letter "a"
-- **\<C-a\>** - Ctrl+a
-- **\<D-k\>v** - Super+k followed by v
-- **\<leader\>s** - Leader followed by s
-- **\<C-S-Tab\>** - Ctrl+Shift+Tab
+- **<C-a>** - Ctrl+a
+- **<D-k>v** - Super+k followed by v
+- **<leader>s** - Leader followed by s
+- **<C-S-Tab>** - Ctrl+Shift+Tab
 
 Example:
 
@@ -284,8 +286,17 @@ The tiling UI uses a leader key sequence. Press the leader key (default:
 **1-9**
 :   Switch to tab by number
 
-**d**, **q**
+**r**
+:   Rename current tab
+
+**d**
 :   Detach from session
+
+**q**
+:   Quit prise
+
+**0**
+:   Switch to tab 10
 
 The command palette (**Super+p**) provides fuzzy search for all commands.
 

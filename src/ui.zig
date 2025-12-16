@@ -96,34 +96,56 @@ pub const UI = struct {
         cwd: ?[]const u8 = null,
     };
 
-    pub fn init(allocator: std.mem.Allocator) !UI {
-        const lua = try ziglua.Lua.init(allocator);
+    pub const InitError = struct {
+        err: anyerror,
+        lua_msg: ?[:0]const u8,
+    };
+
+    pub const InitResult = union(enum) {
+        ok: UI,
+        err: InitError,
+    };
+
+    pub fn init(allocator: std.mem.Allocator) InitResult {
+        const lua = ziglua.Lua.init(allocator) catch |err| {
+            return .{ .err = .{ .err = err, .lua_msg = null } };
+        };
         errdefer lua.deinit();
 
-        const local_tz = try zeit.local(allocator, null);
+        const local_tz = zeit.local(allocator, null) catch |err| {
+            return .{ .err = .{ .err = err, .lua_msg = null } };
+        };
         errdefer local_tz.deinit();
 
         lua.openLibs();
 
         // Add prise lua paths to package.path for runtime loading
-        const home = std.posix.getenv("HOME") orelse return error.NoHomeDirectory;
-        _ = try lua.getGlobal("package");
+        const home = std.posix.getenv("HOME") orelse {
+            return .{ .err = .{ .err = error.NoHomeDirectory, .lua_msg = null } };
+        };
+        _ = lua.getGlobal("package") catch |err| {
+            return .{ .err = .{ .err = err, .lua_msg = null } };
+        };
         _ = lua.getField(-1, "path");
         const current_path = lua.toString(-1) catch "";
         lua.pop(1);
 
-        const extra_paths = try std.fmt.allocPrint(
+        const extra_paths = std.fmt.allocPrint(
             allocator,
             "{s}/.local/share/prise/lua/?.lua;/usr/local/share/prise/lua/?.lua;/usr/share/prise/lua/?.lua;/opt/homebrew/share/prise/lua/?.lua;{s}",
             .{ home, current_path },
-        );
+        ) catch |err| {
+            return .{ .err = .{ .err = err, .lua_msg = null } };
+        };
         defer allocator.free(extra_paths);
         _ = lua.pushString(extra_paths);
         lua.setField(-2, "path");
         lua.pop(1);
 
         // Register prise module loader (always use embedded for API stability)
-        _ = try lua.getGlobal("package");
+        _ = lua.getGlobal("package") catch |err| {
+            return .{ .err = .{ .err = err, .lua_msg = null } };
+        };
         _ = lua.getField(-1, "preload");
         lua.pushFunction(ziglua.wrap(loadPriseModule));
         lua.setField(-2, "prise");
@@ -132,7 +154,9 @@ pub const UI = struct {
         // In debug builds, always use embedded to simplify development
         // (preload takes precedence over path, so we check explicitly)
         const tiling_on_disk = if (builtin.mode == .Debug) false else blk: {
-            const user_path = try std.fs.path.join(allocator, &.{ home, ".local", "share", "prise", "lua", "prise_tiling_ui.lua" });
+            const user_path = std.fs.path.join(allocator, &.{ home, ".local", "share", "prise", "lua", "prise_tiling_ui.lua" }) catch {
+                break :blk false;
+            };
             defer allocator.free(user_path);
             const paths = [_][]const u8{
                 user_path,
@@ -152,7 +176,9 @@ pub const UI = struct {
         lua.pop(2);
 
         // Try to load ~/.config/prise/init.lua
-        const config_path = try std.fs.path.joinZ(allocator, &.{ home, ".config", "prise", "init.lua" });
+        const config_path = std.fs.path.joinZ(allocator, &.{ home, ".config", "prise", "init.lua" }) catch |err| {
+            return .{ .err = .{ .err = err, .lua_msg = null } };
+        };
         defer allocator.free(config_path);
 
         // If init.lua doesn't exist, use default UI
@@ -167,19 +193,19 @@ pub const UI = struct {
             lua.doString(fallback_init) catch {
                 const msg = lua.toString(-1) catch "unknown error";
                 log.err("Failed to load default UI: {s}", .{msg});
-                return error.DefaultUIFailed;
+                return .{ .err = .{ .err = error.DefaultUIFailed, .lua_msg = msg } };
             };
         } else {
             lua.doFile(config_path) catch {
                 const msg = lua.toString(-1) catch "unknown error";
                 log.err("Failed to load init.lua: {s}", .{msg});
-                return error.InitLuaFailed;
+                return .{ .err = .{ .err = error.InitLuaFailed, .lua_msg = msg } };
             };
         }
 
         // init.lua should return a table with update and view functions
         if (lua.typeOf(-1) != .table) {
-            return error.InitLuaMustReturnTable;
+            return .{ .err = .{ .err = error.InitLuaMustReturnTable, .lua_msg = null } };
         }
 
         // Store the UI table in registry
@@ -188,18 +214,18 @@ pub const UI = struct {
         // Initialize PrisePty metatable
         lua_event.registerMetatable(lua) catch |err| {
             log.err("Failed to register metatable: {}", .{err});
-            return err;
+            return .{ .err = .{ .err = err, .lua_msg = null } };
         };
 
         // Initialize TextInput metatable
         registerTextInputMetatable(lua);
 
-        return .{
+        return .{ .ok = .{
             .allocator = allocator,
             .lua = lua,
             .local_tz = local_tz,
             .text_inputs = std.AutoHashMap(u32, *TextInput).init(allocator),
-        };
+        } };
     }
 
     pub fn setLoop(self: *UI, loop: *io.Loop) void {
